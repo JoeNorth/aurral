@@ -50,6 +50,9 @@ export function buildResolvedPlaylistTrack(job, payloadTrack = {}) {
     trackMbid: job.trackMbid || track.trackMbid,
     releaseYear: job.releaseYear || track.releaseYear,
     durationMs: job.durationMs ?? track.durationMs ?? null,
+    sourceProvider: job.sourceProvider || track.sourceProvider || null,
+    sourceId: job.sourceId || track.sourceId || null,
+    sourceUrl: job.sourceUrl || track.sourceUrl || null,
     trackNumber: normalizePositiveInteger(job.trackNumber ?? track.trackNumber),
     albumTrackCount: normalizePositiveInteger(job.albumTrackCount ?? track.albumTrackCount),
     albumTrackTitles: normalizeStringList(
@@ -166,7 +169,9 @@ export async function writeAudioMetadata(filePath, metadata = {}) {
     return sourcePath;
   } catch (error) {
     await fs.rm(taggedPath, { force: true }).catch(() => {});
-    const detail = String(error?.stderr || error?.message || error).trim().slice(-500);
+    const detail = String(error?.stderr || error?.message || error)
+      .trim()
+      .slice(-500);
     throw new Error(`Failed to write audio metadata: ${detail}`);
   }
 }
@@ -195,9 +200,7 @@ export async function repairYtdlpMetadata(jobs = []) {
         [common.album, job.albumName],
       ].filter(([, value]) => String(value || "").trim());
       if (
-        expected.every(
-          ([actual, value]) => String(actual || "").trim() === String(value).trim(),
-        )
+        expected.every(([actual, value]) => String(actual || "").trim() === String(value).trim())
       ) {
         continue;
       }

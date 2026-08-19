@@ -586,9 +586,7 @@ function isSelfTitledAlbumContext(context) {
 function readMatcherOptions(options = {}) {
   const preferredFormat = String(options?.preferredFormat || "").toLowerCase();
   return {
-    preferredFormat: ["flac", "mp3", "m4a"].includes(preferredFormat)
-      ? preferredFormat
-      : "flac",
+    preferredFormat: ["flac", "mp3", "m4a"].includes(preferredFormat) ? preferredFormat : "flac",
     strictFormat: options?.strictFormat === true,
     isUserBlacklisted:
       typeof options?.isUserBlacklisted === "function" ? options.isUserBlacklisted : () => false,
@@ -736,12 +734,8 @@ function buildGroupCandidate(group, context, options = {}) {
   const audioFiles = group.audioFiles;
 
   const files = strictFormat
-    ? audioFiles.filter(
-        (item) =>
-          isPreferredFormat(
-            path.extname(String(item?.file || "")).toLowerCase(),
-            preferredFormat,
-          ),
+    ? audioFiles.filter((item) =>
+        isPreferredFormat(path.extname(String(item?.file || "")).toLowerCase(), preferredFormat),
       )
     : audioFiles;
   const candidates = [];
@@ -960,9 +954,16 @@ function readDownloadDurationValidation(parsed, expectedDuration, titleScore = 0
   }
 
   const durationValid =
-    durationDiffMs <= 25000 ||
-    durationDiffMs <= Math.max(12000, expectedDuration * 0.18);
+    durationDiffMs <= 25000 || durationDiffMs <= Math.max(12000, expectedDuration * 0.18);
   return { actualDurationMs, durationValid };
+}
+
+export function isExplicitSourceQualityPlayable(quality) {
+  return (
+    Boolean(quality?.format) &&
+    Number.isFinite(Number(quality?.bitrateKbps)) &&
+    Number(quality.bitrateKbps) > 0
+  );
 }
 
 export async function validateDownloadedTrack(filePath, candidate, context) {
@@ -990,7 +991,10 @@ export async function validateDownloadedTrack(filePath, candidate, context) {
     pickBestArtistScore(context, remoteFilename),
   );
   const albumScore = albumName
-    ? Math.max(scoreAgainstPath(albumFromTags, albumName), scoreAgainstPath(remoteFilename, albumName))
+    ? Math.max(
+        scoreAgainstPath(albumFromTags, albumName),
+        scoreAgainstPath(remoteFilename, albumName),
+      )
     : 0;
   const yearScore = scoreYearMatch(remoteFilename, context?.releaseYear);
   const yearMismatch = hasConflictingYear(remoteFilename, context?.releaseYear);
@@ -1022,6 +1026,12 @@ export async function validateDownloadedTrack(filePath, candidate, context) {
     siblingTrackPenalty,
     context,
   });
+  const exactSourceMatch =
+    candidate?.exactSource === true &&
+    Boolean(context?.sourceUrl) &&
+    String(candidate?.raw?.url || "") === String(context.sourceUrl) &&
+    (!context?.sourceId || String(candidate?.raw?.id || "") === String(context.sourceId));
+  const admittedMatch = exactSourceMatch ? { valid: true, reason: "exact-source" } : matchCheck;
   const { actualDurationMs, durationValid } = readDownloadDurationValidation(
     parsed,
     expectedDuration,
@@ -1031,8 +1041,11 @@ export async function validateDownloadedTrack(filePath, candidate, context) {
   const qualityCheck = validateParsedQuality(parsed, filePath, {
     upgradeForJobId: context?.upgradeForJobId || null,
   });
-  const valid = matchCheck.valid && durationValid && qualityCheck.valid;
-  const blocked = matchCheck.valid && qualityCheck.valid && !durationValid;
+  const qualityValid =
+    qualityCheck.valid ||
+    (exactSourceMatch && isExplicitSourceQualityPlayable(qualityCheck.quality));
+  const valid = admittedMatch.valid && durationValid && qualityValid;
+  const blocked = admittedMatch.valid && qualityValid && !durationValid;
 
   return {
     valid,
@@ -1041,9 +1054,9 @@ export async function validateDownloadedTrack(filePath, candidate, context) {
       ? null
       : blocked
         ? `blocked-duration-mismatch: title=${titleScore}, artist=${artistScore}, album=${albumScore}, actualDurationMs=${actualDurationMs}, expectedDurationMs=${expectedDuration}`
-        : !matchCheck.valid
-          ? `${matchCheck.reason}: title=${titleScore}, artist=${artistScore}, album=${albumScore}, variantScore=${variantMatch.score}, trackNumberMismatch=${trackNumberMismatch}`
-          : !qualityCheck.valid
+        : !admittedMatch.valid
+          ? `${admittedMatch.reason}: title=${titleScore}, artist=${artistScore}, album=${albumScore}, variantScore=${variantMatch.score}, trackNumberMismatch=${trackNumberMismatch}`
+          : !qualityValid
             ? qualityCheck.reason
             : `duration-mismatch: title=${titleScore}, artist=${artistScore}, album=${albumScore}, durationValid=${durationValid}`,
     scores: {
@@ -1053,7 +1066,7 @@ export async function validateDownloadedTrack(filePath, candidate, context) {
       durationValid,
       variant: variantMatch.score,
       trackNumberMismatch,
-      matchReason: matchCheck.reason,
+      matchReason: admittedMatch.reason,
       preDownloadValid: candidate?.preDownloadValid === true,
     },
     actualDurationMs,

@@ -1,5 +1,16 @@
 import { useState, useEffect, useCallback, useMemo, lazy, Suspense } from "react";
-import { Check, Loader2, Play, FilePlus2, Download, Trash2, Search, RefreshCw, ClipboardCopy, ListMusic } from "lucide-react";
+import {
+  Check,
+  Loader2,
+  Play,
+  FilePlus2,
+  Download,
+  Trash2,
+  Search,
+  RefreshCw,
+  ClipboardCopy,
+  ListMusic,
+} from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
   getFlowJobs,
@@ -103,10 +114,7 @@ function useFlowMobileLayout() {
   );
 
   useEffect(() => {
-    if (
-      typeof window === "undefined" ||
-      typeof window.matchMedia !== "function"
-    ) {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
       return undefined;
     }
     const mediaQuery = window.matchMedia(FLOW_MOBILE_LAYOUT_QUERY);
@@ -251,8 +259,8 @@ function FlowPage({ mode = "all" }) {
       const payload = isReleaseRadarFlow(flow)
         ? buildReleaseRadarFlowFromForm(flow, draft)
         : isEditorialFlow(flow)
-        ? buildEditorialFlowFromForm(flow, draft)
-        : buildFlowFromForm(draft);
+          ? buildEditorialFlowFromForm(flow, draft)
+          : buildFlowFromForm(draft);
       const response = await updateFlow(flow.id, payload);
       const updatedFlow = response?.flow || {
         ...flow,
@@ -296,14 +304,14 @@ function FlowPage({ mode = "all" }) {
             name: nextName,
           }
         : isEditorialFlow(flow)
-        ? {
-            ...buildEditorialFlowFromForm(flow, currentDraft),
-            name: nextName,
-          }
-        : buildFlowFromForm({
-            ...flowToForm(flow),
-            name: nextName,
-          });
+          ? {
+              ...buildEditorialFlowFromForm(flow, currentDraft),
+              name: nextName,
+            }
+          : buildFlowFromForm({
+              ...flowToForm(flow),
+              name: nextName,
+            });
       const response = await updateFlow(flow.id, payload);
       const updatedFlow = response?.flow || {
         ...flow,
@@ -1065,8 +1073,8 @@ function FlowPage({ mode = "all" }) {
         result?.scheduled
           ? "Upgrade search queued"
           : result?.queued > 0
-          ? `Searching upgrades for ${result.queued} track${result.queued !== 1 ? "s" : ""}`
-          : "No tracks are eligible for an upgrade",
+            ? `Searching upgrades for ${result.queued} track${result.queued !== 1 ? "s" : ""}`
+            : "No tracks are eligible for an upgrade",
       );
       await fetchFlowTracks(playlistId, { showSpinner: false });
     } catch (err) {
@@ -1142,9 +1150,7 @@ function FlowPage({ mode = "all" }) {
           pageSize: 100,
           query: track.artistName,
         });
-        canonicalId = canonicalLibraryId(
-          findCanonicalArtistByName(page?.items, track.artistName),
-        );
+        canonicalId = canonicalLibraryId(findCanonicalArtistByName(page?.items, track.artistName));
       } catch {}
     }
     if (canonicalId) navigate(`/library/artist/${encodeURIComponent(canonicalId)}`);
@@ -1212,9 +1218,7 @@ function FlowPage({ mode = "all" }) {
   };
 
   const handleBulkAddToPlaylist = async (tracks, target) => {
-    const payloads = tracks
-      .map((t) => normalizeSharedTrackEntry(t))
-      .filter(Boolean);
+    const payloads = tracks.map((t) => normalizeSharedTrackEntry(t)).filter(Boolean);
     if (payloads.length === 0) {
       showError("No valid tracks to add");
       return;
@@ -1222,16 +1226,13 @@ function FlowPage({ mode = "all" }) {
     setBulkActionLoading(true);
     try {
       if (target?.mode === "new") {
-        const name =
-          String(target?.name || "").trim() || getNextPlaylistName("Playlist");
+        const name = String(target?.name || "").trim() || getNextPlaylistName("Playlist");
         const response = await createSharedPlaylist({ name, tracks: payloads });
         showSuccess(
           `Added ${payloads.length} track${payloads.length !== 1 ? "s" : ""} to ${response?.playlist?.name || name}`,
         );
       } else {
-        const targetPlaylist = sharedPlaylists.find(
-          (p) => p.id === target?.playlistId,
-        );
+        const targetPlaylist = sharedPlaylists.find((p) => p.id === target?.playlistId);
         await addSharedPlaylistTracks(target.playlistId, { tracks: payloads });
         showSuccess(
           `Added ${payloads.length} track${payloads.length !== 1 ? "s" : ""} to ${targetPlaylist?.name || "playlist"}`,
@@ -1242,9 +1243,7 @@ function FlowPage({ mode = "all" }) {
         await fetchFlowTracks(selectedId, { showSpinner: false });
       }
     } catch (err) {
-      showError(
-        err.response?.data?.message || err.message || "Failed to add tracks",
-      );
+      showError(err.response?.data?.message || err.message || "Failed to add tracks");
     } finally {
       setBulkActionLoading(false);
     }
@@ -1252,9 +1251,7 @@ function FlowPage({ mode = "all" }) {
 
   const handleBulkMoveToPlaylist = async (tracks, target) => {
     if (!selectedPlaylist) return;
-    const payloads = tracks
-      .map((t) => normalizeSharedTrackEntry(t))
-      .filter(Boolean);
+    const payloads = tracks.map((t) => normalizeSharedTrackEntry(t)).filter(Boolean);
     if (payloads.length === 0) {
       showError("No valid tracks to move");
       return;
@@ -1262,21 +1259,16 @@ function FlowPage({ mode = "all" }) {
     setBulkActionLoading(true);
     try {
       if (target?.mode === "new") {
-        const name =
-          String(target?.name || "").trim() || getNextPlaylistName("Playlist");
+        const name = String(target?.name || "").trim() || getNextPlaylistName("Playlist");
         await createSharedPlaylist({ name, tracks: payloads });
         for (const track of tracks) {
           if (track?.id) {
             await deleteSharedPlaylistTrack(selectedPlaylist.id, track.id);
           }
         }
-        showSuccess(
-          `Moved ${payloads.length} track${payloads.length !== 1 ? "s" : ""} to ${name}`,
-        );
+        showSuccess(`Moved ${payloads.length} track${payloads.length !== 1 ? "s" : ""} to ${name}`);
       } else {
-        const targetPlaylist = sharedPlaylists.find(
-          (p) => p.id === target?.playlistId,
-        );
+        const targetPlaylist = sharedPlaylists.find((p) => p.id === target?.playlistId);
         await addSharedPlaylistTracks(target.playlistId, { tracks: payloads });
         for (const track of tracks) {
           if (track?.id) {
@@ -1290,9 +1282,7 @@ function FlowPage({ mode = "all" }) {
       await fetchStatus();
       await fetchFlowTracks(selectedPlaylist.id, { showSpinner: false });
     } catch (err) {
-      showError(
-        err.response?.data?.message || err.message || "Failed to move tracks",
-      );
+      showError(err.response?.data?.message || err.message || "Failed to move tracks");
     } finally {
       setBulkActionLoading(false);
     }
@@ -1539,10 +1529,7 @@ function FlowPage({ mode = "all" }) {
                   className="flow-page__menu-sync-select"
                   value={selectedPlaylist.importSource?.syncIntervalHours ?? 0}
                   onChange={(event) =>
-                    handleUpdateSpotifySyncInterval(
-                      selectedPlaylist,
-                      Number(event.target.value),
-                    )
+                    handleUpdateSpotifySyncInterval(selectedPlaylist, Number(event.target.value))
                   }
                   disabled={updatingSyncIntervalPlaylistId === selectedPlaylist.id}
                 >
@@ -1617,9 +1604,7 @@ function FlowPage({ mode = "all" }) {
             reSearchingTrackIds={reSearchingTrackIds}
             deletingTrackId={selectedIsFlow ? undefined : deletingTrackId}
             onReSearchTrack={
-              selectedIsFlow
-                ? (track) => handleReSearchTrack(selectedFlow.id, track)
-                : undefined
+              selectedIsFlow ? (track) => handleReSearchTrack(selectedFlow.id, track) : undefined
             }
             onDeleteTrack={
               selectedIsFlow || !selectedPlaylist
@@ -1967,7 +1952,7 @@ function FlowPage({ mode = "all" }) {
             onImported={fetchStatus}
             showError={showError}
             showSuccess={showSuccess}
-            existingPlaylistNames={(status?.sharedPlaylists || []).map((playlist) => playlist?.name)}
+            sharedPlaylists={status?.sharedPlaylists || []}
           />
         </Suspense>
       ) : null}

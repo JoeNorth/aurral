@@ -133,6 +133,9 @@ db.exec(`
     album_track_count INTEGER,
     album_track_titles TEXT,
     artist_aliases TEXT,
+    source_provider TEXT,
+    source_id TEXT,
+    source_url TEXT,
     playlist_id TEXT NOT NULL,
     playlist_type TEXT,
     status TEXT NOT NULL,
@@ -388,15 +391,18 @@ db.exec(`
 tryAddColumn("ALTER TABLE library_media_files ADD COLUMN album_id INTEGER");
 
 function hasUniqueIndex(columns) {
-  return db.prepare("PRAGMA index_list(library_media_files)").all().some((index) => {
-    if (!index.unique) return false;
-    const indexName = String(index.name).replaceAll('"', '""');
-    const indexColumns = db
-      .prepare(`PRAGMA index_info("${indexName}")`)
-      .all()
-      .map((column) => column.name);
-    return JSON.stringify(indexColumns) === JSON.stringify(columns);
-  });
+  return db
+    .prepare("PRAGMA index_list(library_media_files)")
+    .all()
+    .some((index) => {
+      if (!index.unique) return false;
+      const indexName = String(index.name).replaceAll('"', '""');
+      const indexColumns = db
+        .prepare(`PRAGMA index_info("${indexName}")`)
+        .all()
+        .map((column) => column.name);
+      return JSON.stringify(indexColumns) === JSON.stringify(columns);
+    });
 }
 
 if (hasUniqueIndex(["path"])) {
@@ -528,6 +534,9 @@ for (const [name, type] of [
   ["quality_checked_at", "INTEGER"],
   ["quality_upgrade_checked_at", "INTEGER"],
   ["upgrade_for_job_id", "TEXT"],
+  ["source_provider", "TEXT"],
+  ["source_id", "TEXT"],
+  ["source_url", "TEXT"],
 ]) {
   if (!tableColumns.includes(name)) {
     tryAddColumn(`ALTER TABLE playlist_download_jobs ADD COLUMN ${name} ${type}`);

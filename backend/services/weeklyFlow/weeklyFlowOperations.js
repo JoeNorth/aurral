@@ -121,22 +121,24 @@ const queueTracksForPlaylist = async (tracks, playlistId) => {
     const jobId = downloadTracker.addJob(track, playlistId);
     if (!jobId) continue;
     createdJobIds.push(jobId);
-    try {
-      const reuse = await reuseTrackForPlaylist(track, playlistId, {
-        existingFileMode,
-        weeklyFlowRoot: weeklyFlowWorker.weeklyFlowRoot,
-        targetPlaylistType: playlistId,
-        skipHistory: true,
-        existingJobId: jobId,
-      });
-      if (reuse.reused) {
-        reusedJobIds.push(jobId);
-        continue;
+    if (!track.sourceUrl) {
+      try {
+        const reuse = await reuseTrackForPlaylist(track, playlistId, {
+          existingFileMode,
+          weeklyFlowRoot: weeklyFlowWorker.weeklyFlowRoot,
+          targetPlaylistType: playlistId,
+          skipHistory: true,
+          existingJobId: jobId,
+        });
+        if (reuse.reused) {
+          reusedJobIds.push(jobId);
+          continue;
+        }
+      } catch (error) {
+        console.warn(
+          `[WeeklyFlow] Reuse failed for ${track.artistName} - ${track.trackName}: ${error?.message || error}`,
+        );
       }
-    } catch (error) {
-      console.warn(
-        `[WeeklyFlow] Reuse failed for ${track.artistName} - ${track.trackName}: ${error?.message || error}`,
-      );
     }
     jobIds.push(jobId);
   }
@@ -357,10 +359,7 @@ async function createSharedPlaylist({
   description = null,
 } = {}) {
   const safePlaylistId = String(playlistId || "").trim() || randomUUID();
-  const normalizedTracks = filterBlockedPlaylistTracks(
-    ownerUserId,
-    normalizeTrackList(tracks),
-  );
+  const normalizedTracks = filterBlockedPlaylistTracks(ownerUserId, normalizeTrackList(tracks));
   let playlist = flowPlaylistConfig.getSharedPlaylist(safePlaylistId);
   if (!playlist) {
     playlist = flowPlaylistConfig.createSharedPlaylist({

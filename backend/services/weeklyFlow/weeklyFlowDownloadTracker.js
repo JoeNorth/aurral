@@ -9,9 +9,7 @@ import {
   sanitizePathPart,
   stringifyStringListJson,
 } from "../playlistDownloadUtils.js";
-import {
-  buildAurralTrackDestination,
-} from "../playlistPaths.js";
+import { buildAurralTrackDestination } from "../playlistPaths.js";
 import { flowPlaylistConfig } from "./weeklyFlowPlaylistConfig.js";
 
 const parseDeniedSources = (raw) => {
@@ -45,6 +43,9 @@ function rowToJob(row) {
     albumTrackCount: normalizePositiveInteger(row.album_track_count),
     albumTrackTitles: parseStringListJson(row.album_track_titles),
     artistAliases: parseStringListJson(row.artist_aliases),
+    sourceProvider: row.source_provider || null,
+    sourceId: row.source_id || null,
+    sourceUrl: row.source_url || null,
     playlistId: row.playlist_id || row.playlist_type,
     playlistType: row.playlist_type || row.playlist_id,
     status: row.status,
@@ -95,6 +96,9 @@ const insertStmt = db.prepare(`
     album_track_count,
     album_track_titles,
     artist_aliases,
+    source_provider,
+    source_id,
+    source_url,
     playlist_id,
     playlist_type,
     status,
@@ -114,7 +118,7 @@ const insertStmt = db.prepare(`
     quality_upgrade_checked_at,
     upgrade_for_job_id
   )
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 const updateStmt = db.prepare(`
@@ -137,6 +141,9 @@ const updateStmt = db.prepare(`
       album_track_count = ?,
       album_track_titles = ?,
       artist_aliases = ?,
+      source_provider = ?,
+      source_id = ?,
+      source_url = ?,
       quality_tier = ?,
       quality_format = ?,
       quality_bitrate_kbps = ?,
@@ -154,9 +161,7 @@ const selectAllStmt = db.prepare(`SELECT * FROM ${JOBS_TABLE} ORDER BY created_a
 const updatePlaylistTypeStmt = db.prepare(
   `UPDATE ${JOBS_TABLE} SET playlist_type = ?, playlist_id = ? WHERE playlist_type = ?`,
 );
-const updatePlaylistIdStmt = db.prepare(
-  `UPDATE ${JOBS_TABLE} SET playlist_id = ? WHERE id = ?`,
-);
+const updatePlaylistIdStmt = db.prepare(`UPDATE ${JOBS_TABLE} SET playlist_id = ? WHERE id = ?`);
 const clearSlskdMetaStmt = db.prepare(`
   UPDATE ${JOBS_TABLE}
   SET download_source = NULL,
@@ -208,11 +213,21 @@ const sortByCreatedAt = (jobs) =>
     return String(a?.id || "").localeCompare(String(b?.id || ""));
   });
 
-function buildPipelinePayload(job) {
+export function buildPipelinePayload(job) {
   const playlistId = job.playlistId || job.playlistType;
   const artistDir = sanitizePathPart(job.artistName, "Unknown Artist");
   const albumDir = sanitizePathPart(job.albumName, "Unknown Album");
   const ephemeral = Boolean(flowPlaylistConfig.getFlow(String(job.playlistType || "").trim()));
+  const exactSource =
+    !job.upgradeForJobId &&
+    job.sourceProvider === "soundcloud" &&
+    String(job.sourceUrl || "").trim()
+      ? {
+          provider: "soundcloud",
+          id: job.sourceId || null,
+          url: job.sourceUrl,
+        }
+      : null;
   return {
     phase: "search",
     jobId: job.id,
@@ -230,12 +245,16 @@ function buildPipelinePayload(job) {
       albumTrackCount: job.albumTrackCount,
       albumTrackTitles: job.albumTrackTitles || [],
       artistAliases: job.artistAliases || [],
+      sourceProvider: job.sourceProvider,
+      sourceId: job.sourceId,
+      sourceUrl: job.sourceUrl,
     },
+    exactSource,
     attempt: 0,
     destination: buildAurralTrackDestination(playlistId, artistDir, albumDir, { ephemeral }),
     upgrade: Boolean(job.upgradeForJobId),
     upgradeForJobId: job.upgradeForJobId || null,
-    allowedSources: job.upgradeForJobId ? ["slskd", "usenet"] : null,
+    allowedSources: job.upgradeForJobId ? ["slskd", "usenet"] : exactSource ? ["ytdlp"] : null,
   };
 }
 
@@ -449,6 +468,9 @@ export class WeeklyFlowDownloadTracker {
           job.albumTrackCount ?? null,
           stringifyStringListJson(job.albumTrackTitles),
           stringifyStringListJson(job.artistAliases),
+          job.sourceProvider ?? null,
+          job.sourceId ?? null,
+          job.sourceUrl ?? null,
           job.qualityTier ?? null,
           job.qualityFormat ?? null,
           job.qualityBitrateKbps ?? null,
@@ -486,6 +508,9 @@ export class WeeklyFlowDownloadTracker {
       job.albumTrackCount ?? null,
       stringifyStringListJson(job.albumTrackTitles),
       stringifyStringListJson(job.artistAliases),
+      job.sourceProvider ?? null,
+      job.sourceId ?? null,
+      job.sourceUrl ?? null,
       job.playlistId || job.playlistType,
       job.playlistType || job.playlistId,
       job.status,
@@ -528,6 +553,9 @@ export class WeeklyFlowDownloadTracker {
       job.albumTrackCount ?? null,
       stringifyStringListJson(job.albumTrackTitles),
       stringifyStringListJson(job.artistAliases),
+      job.sourceProvider ?? null,
+      job.sourceId ?? null,
+      job.sourceUrl ?? null,
       job.qualityTier ?? null,
       job.qualityFormat ?? null,
       job.qualityBitrateKbps ?? null,
@@ -566,6 +594,11 @@ export class WeeklyFlowDownloadTracker {
       albumTrackCount: normalizePositiveInteger(track?.albumTrackCount),
       albumTrackTitles: normalizeStringList(track?.albumTrackTitles),
       artistAliases: normalizeStringList(track?.artistAliases),
+      sourceProvider: track?.sourceProvider
+        ? String(track.sourceProvider).trim().toLowerCase()
+        : null,
+      sourceId: track?.sourceId ? String(track.sourceId).trim() : null,
+      sourceUrl: track?.sourceUrl ? String(track.sourceUrl).trim() : null,
       playlistId: playlistType,
       playlistType,
       status: "pending",
@@ -599,15 +632,14 @@ export class WeeklyFlowDownloadTracker {
 
   findActiveUpgradeJob(sourceJob) {
     if (!sourceJob?.finalPath) return null;
-    return [...this.jobs.values()].find((job) => {
-      if (
-        !job.upgradeForJobId ||
-        (job.status !== "pending" && job.status !== "downloading")
-      ) {
-        return false;
-      }
-      return this.jobs.get(job.upgradeForJobId)?.finalPath === sourceJob.finalPath;
-    }) || null;
+    return (
+      [...this.jobs.values()].find((job) => {
+        if (!job.upgradeForJobId || (job.status !== "pending" && job.status !== "downloading")) {
+          return false;
+        }
+        return this.jobs.get(job.upgradeForJobId)?.finalPath === sourceJob.finalPath;
+      }) || null
+    );
   }
 
   addUpgradeJob(sourceJob) {

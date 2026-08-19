@@ -18,7 +18,11 @@
   --aurral-accent: light-dark(#525252, #b3b3b3);
   --aurral-accent-contrast: light-dark(#ffffff, #111111);
   --aurral-surface-raised: color-mix(in srgb, var(--aurral-surface) 94%, var(--aurral-text));
-  --aurral-surface-popover: color-mix(in srgb, var(--aurral-surface-raised) 94%, var(--aurral-text));
+  --aurral-surface-popover: color-mix(
+    in srgb,
+    var(--aurral-surface-raised) 94%,
+    var(--aurral-text)
+  );
   --aurral-surface-glass: var(--aurral-surface-popover);
   --aurral-surface-hover: color-mix(in srgb, var(--aurral-surface-popover) 90%, var(--aurral-text));
   --aurral-surface-selected: color-mix(in srgb, var(--aurral-text) 7%, var(--aurral-surface));
@@ -3809,7 +3813,8 @@ textarea {
   padding: 1.25rem;
 }
 
-.artist-about-card__body--overlay :is(.artist-about-meta, .artist-about-bio, .artist-modal__subcopy) {
+.artist-about-card__body--overlay
+  :is(.artist-about-meta, .artist-about-bio, .artist-modal__subcopy) {
   color: #fff;
 }
 
@@ -6700,11 +6705,8 @@ textarea {
     background-color 0.18s ease;
 }
 
-.search-top-artist__main--overlay :is(
-    .search-top-artist__image-wrap,
-    .search-top-artist__name,
-    .search-top-artist__meta-row
-  ) {
+.search-top-artist__main--overlay
+  :is(.search-top-artist__image-wrap, .search-top-artist__name, .search-top-artist__meta-row) {
   color: #fff;
 }
 
@@ -7752,7 +7754,9 @@ textarea {
   font-size: 0.74rem;
   font-weight: 500;
   text-decoration: none;
-  transition: background 150ms ease, color 150ms ease;
+  transition:
+    background 150ms ease,
+    color 150ms ease;
 }
 
 .native-library-genre-card:hover,
@@ -7805,7 +7809,10 @@ textarea {
   color: var(--aurral-text-muted);
   cursor: pointer;
   opacity: 0;
-  transition: opacity 120ms ease, background 120ms ease, color 120ms ease;
+  transition:
+    opacity 120ms ease,
+    background 120ms ease,
+    color 120ms ease;
 }
 
 .native-library-card__cover-wrap:hover .native-library-item-menu__trigger,
@@ -8101,7 +8108,8 @@ button.native-library-card__artist:focus-visible {
 }
 
 .native-library-track {
-  --native-library-track-columns: 2rem 2rem 2.35rem minmax(12rem, 1.4fr) minmax(8rem, 1fr) minmax(8rem, 1fr) 4.5rem 1.7rem 1.7rem 1.7rem;
+  --native-library-track-columns: 2rem 2rem 2.35rem minmax(12rem, 1.4fr) minmax(8rem, 1fr)
+    minmax(8rem, 1fr) 4.5rem 1.7rem 1.7rem 1.7rem;
 
   display: grid;
   min-width: 44rem;
@@ -8598,7 +8606,8 @@ button.native-library-genre-row:focus-visible {
   }
 
   .native-library-track {
-    --native-library-track-columns: 2rem 2.2rem 2.35rem minmax(10rem, 1fr) 4.5rem 1.7rem 1.7rem 1.7rem;
+    --native-library-track-columns: 2rem 2.2rem 2.35rem minmax(10rem, 1fr) 4.5rem 1.7rem 1.7rem
+      1.7rem;
 
     min-width: 32rem;
   }
@@ -11811,6 +11820,7 @@ button.native-library-genre-row:focus-visible {
 }
 
 .playlist-import__spotify,
+.playlist-import__soundcloud,
 .playlist-import__json {
   display: grid;
   gap: 0.625rem;
@@ -12038,6 +12048,16 @@ button.native-library-genre-row:focus-visible {
 
 .playlist-import__config .input:focus-visible {
   border-color: var(--aurral-border-strong);
+}
+
+.playlist-import__url-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem;
+}
+
+.playlist-import__url-row .btn {
+  align-self: stretch;
 }
 
 .playlist-import__summary {

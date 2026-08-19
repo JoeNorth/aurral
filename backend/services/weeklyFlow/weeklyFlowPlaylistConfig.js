@@ -224,14 +224,9 @@ const normalizeFlow = (flow) => {
   const normalizedRelatedArray = normalizeStringArray(flow?.relatedArtists);
   const legacyTags = normalizeWeightMap(flow?.tags);
   const legacyRelatedArtists = normalizeWeightMap(flow?.relatedArtists);
-  const tags =
-    normalizedTagsArray.length > 0
-      ? normalizedTagsArray
-      : Object.keys(legacyTags);
+  const tags = normalizedTagsArray.length > 0 ? normalizedTagsArray : Object.keys(legacyTags);
   const relatedArtists =
-    normalizedRelatedArray.length > 0
-      ? normalizedRelatedArray
-      : Object.keys(legacyRelatedArtists);
+    normalizedRelatedArray.length > 0 ? normalizedRelatedArray : Object.keys(legacyRelatedArtists);
   const { yearFrom, yearTo } = normalizeYearRange(flow?.yearFrom, flow?.yearTo);
   return {
     id: flow?.id || randomUUID(),
@@ -295,6 +290,11 @@ export const normalizeSharedTrack = (track) => {
     ? track.artistAliases.map((entry) => String(entry || "").trim()).filter(Boolean)
     : [];
   const reason = String(track.reason ?? "").trim();
+  const sourceProvider = String(track.sourceProvider ?? track.source?.provider ?? "")
+    .trim()
+    .toLowerCase();
+  const sourceId = String(track.sourceId ?? track.source?.id ?? "").trim();
+  const sourceUrl = String(track.sourceUrl ?? track.source?.url ?? "").trim();
   return {
     artistName,
     trackName,
@@ -306,14 +306,23 @@ export const normalizeSharedTrack = (track) => {
     durationMs,
     artistAliases,
     reason: reason || null,
+    sourceProvider: sourceProvider || null,
+    sourceId: sourceId || null,
+    sourceUrl: sourceUrl || null,
   };
 };
 
 export const buildSharedTrackIdentity = (track) =>
   [
-    String(track?.artistName || "").trim().toLowerCase(),
-    String(track?.trackName || "").trim().toLowerCase(),
-    String(track?.albumName || "").trim().toLowerCase(),
+    String(track?.artistName || "")
+      .trim()
+      .toLowerCase(),
+    String(track?.trackName || "")
+      .trim()
+      .toLowerCase(),
+    String(track?.albumName || "")
+      .trim()
+      .toLowerCase(),
     String(track?.artistMbid || "").trim(),
     String(track?.albumMbid || "").trim(),
     String(track?.trackMbid || "").trim(),
@@ -321,8 +330,12 @@ export const buildSharedTrackIdentity = (track) =>
   ].join("\u0001");
 
 export const buildCoreTrackIdentity = (track) => {
-  const artistName = String(track?.artistName || "").trim().toLowerCase();
-  const trackName = String(track?.trackName || "").trim().toLowerCase();
+  const artistName = String(track?.artistName || "")
+    .trim()
+    .toLowerCase();
+  const trackName = String(track?.trackName || "")
+    .trim()
+    .toLowerCase();
   if (!artistName || !trackName) return "";
   return `${artistName}\u0001${trackName}`;
 };
@@ -354,9 +367,7 @@ export const orderJobsBySharedPlaylistTracks = (jobs, tracks) => {
   const orderedJobs = [];
   for (const track of configTracks) {
     const identity = buildSharedTrackIdentity(track);
-    let index = unmatchedJobs.findIndex(
-      (job) => buildSharedTrackIdentity(job) === identity,
-    );
+    let index = unmatchedJobs.findIndex((job) => buildSharedTrackIdentity(job) === identity);
     if (index < 0) {
       index = unmatchedJobs.findIndex((job) => tracksShareMembership(job, track));
     }
@@ -406,6 +417,9 @@ export const rebuildSharedPlaylistTracksFromJobs = (configTracks, jobs) => {
       durationMs: job?.durationMs || null,
       artistAliases: job?.artistAliases || [],
       reason: job?.reason || null,
+      sourceProvider: job?.sourceProvider || null,
+      sourceId: job?.sourceId || null,
+      sourceUrl: job?.sourceUrl || null,
     });
     if (track) remainingTracks.push(track);
   }
@@ -435,17 +449,13 @@ export function normalizeImportSource(value) {
   const syncIntervalHours = Number(value.syncIntervalHours);
   const lastSyncAt = Number(value.lastSyncAt);
   const hasSync =
-    value.syncEnabled !== false &&
-    Number.isFinite(syncIntervalHours) &&
-    syncIntervalHours > 0;
+    value.syncEnabled !== false && Number.isFinite(syncIntervalHours) && syncIntervalHours > 0;
   return {
     provider,
     externalId: String(value.externalId || "").trim() || null,
     externalName: String(value.externalName || "").trim() || null,
     syncEnabled: hasSync,
-    syncIntervalHours: hasSync
-      ? Math.min(Math.max(Math.round(syncIntervalHours), 1), 168)
-      : 0,
+    syncIntervalHours: hasSync ? Math.min(Math.max(Math.round(syncIntervalHours), 1), 168) : 0,
     lastSyncAt: Number.isFinite(lastSyncAt) && lastSyncAt > 0 ? lastSyncAt : null,
     lastSyncError: String(value.lastSyncError || "").trim() || null,
     lastSyncTrackCount:
@@ -622,7 +632,12 @@ const assertUniqueFlowName = (flows, sameOwnerPlaylists, nextName, exceptFlowId 
   }
 };
 
-const assertUniqueSharedPlaylistName = (playlists, sameOwnerFlows, nextName, exceptPlaylistId = null) => {
+const assertUniqueSharedPlaylistName = (
+  playlists,
+  sameOwnerFlows,
+  nextName,
+  exceptPlaylistId = null,
+) => {
   const key = normalizeNameKey(nextName);
   if (!key) return;
   const playlistConflict = playlists.some((playlist) => {
@@ -948,7 +963,9 @@ export const flowPlaylistConfig = {
     });
     playlists[index] = next;
     setSharedPlaylists(playlists);
-    import("../../services/unifiedSearchService.js").then(({ clearSearchContextCache }) => clearSearchContextCache()).catch(() => {});
+    import("../../services/unifiedSearchService.js")
+      .then(({ clearSearchContextCache }) => clearSearchContextCache())
+      .catch(() => {});
     return next;
   },
 

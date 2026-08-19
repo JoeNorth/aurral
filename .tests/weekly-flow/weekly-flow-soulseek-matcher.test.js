@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   bypassBannedArtistTerm,
   buildFlowSearchTiers,
+  isExplicitSourceQualityPlayable,
   rankFlowSearchResults,
   selectRankedMatchAttempts,
   stripReleaseTypeSuffix,
@@ -28,10 +29,7 @@ test("bypassBannedArtistTerm replaces the first character of each artist word", 
 });
 
 test("stripReleaseTypeSuffix removes terminal release metadata only", () => {
-  assert.equal(
-    stripReleaseTypeSuffix("Object Permanence - Single"),
-    "Object Permanence",
-  );
+  assert.equal(stripReleaseTypeSuffix("Object Permanence - Single"), "Object Permanence");
   assert.equal(stripReleaseTypeSuffix("Some Release (EP)"), "Some Release");
   assert.equal(stripReleaseTypeSuffix("Single"), "Single");
   assert.equal(stripReleaseTypeSuffix("Single Mothers"), "Single Mothers");
@@ -47,21 +45,16 @@ test("buildFlowSearchTiers uses a short album-first plan", () => {
   });
 
   assert.equal(tiers[0]?.name, "base_album");
-  assert.ok(
-    tiers[0].queries.includes("Massive Attack Mezzanine 1998"),
-  );
+  assert.ok(tiers[0].queries.includes("Massive Attack Mezzanine 1998"));
   assert.ok(
     tiers.some(
       (tier) =>
-        tier.name === "wildcard_album" &&
-        tier.queries.includes("*assive *ttack Mezzanine 1998"),
+        tier.name === "wildcard_album" && tier.queries.includes("*assive *ttack Mezzanine 1998"),
     ),
   );
   assert.ok(
     tiers.some(
-      (tier) =>
-        tier.name === "album_track" &&
-        tier.queries.includes("Mezzanine Teardrop"),
+      (tier) => tier.name === "album_track" && tier.queries.includes("Mezzanine Teardrop"),
     ),
   );
 });
@@ -142,10 +135,7 @@ const rankFlowCases = [
     assertRanked(ranked) {
       assert.ok(ranked.length > 0);
       assert.equal(ranked[0].preDownloadValid, false);
-      assert.equal(
-        ranked[0].preDownloadRejectReason,
-        "weak-artist-ambiguous-title-album",
-      );
+      assert.equal(ranked[0].preDownloadRejectReason, "weak-artist-ambiguous-title-album");
     },
   },
   {
@@ -406,7 +396,10 @@ const rankFlowCases = [
       artistAliases: [],
     },
     assertRanked(ranked) {
-      assert.equal(ranked.some((entry) => entry.raw.user === "lockedUser"), false);
+      assert.equal(
+        ranked.some((entry) => entry.raw.user === "lockedUser"),
+        false,
+      );
       assert.equal(ranked[0].raw.user, "openUser");
     },
   },
@@ -441,7 +434,10 @@ const rankFlowCases = [
       getUserQueuePenalty: (user) => (user === "queuedUser" ? 200 : 0),
     },
     assertRanked(ranked) {
-      assert.equal(ranked.some((entry) => entry.raw.user === "deadUser"), false);
+      assert.equal(
+        ranked.some((entry) => entry.raw.user === "deadUser"),
+        false,
+      );
       assert.equal(ranked[0].raw.user, "healthyUser");
     },
   },
@@ -592,6 +588,61 @@ test("validateDownloadedTrack scores identity before final quality admission", a
   assert.notEqual(accepted.scores.matchReason, "pre-download-trusted");
   assert.equal(accepted.scores.preDownloadValid, true);
   assert.ok(accepted.scores.title >= 82);
+});
+
+test("explicit source quality accepts playable audio below the automatic profile floor", () => {
+  assert.equal(
+    isExplicitSourceQualityPlayable({
+      tier: null,
+      format: "m4a",
+      bitrateKbps: 97,
+      sampleRate: 44100,
+    }),
+    true,
+  );
+  assert.equal(
+    isExplicitSourceQualityPlayable({
+      tier: null,
+      format: null,
+      bitrateKbps: null,
+    }),
+    false,
+  );
+});
+
+test("validateDownloadedTrack trusts only the inspected exact source identity", async () => {
+  const sourceUrl = "https://soundcloud.com/artist/exact-track";
+  const candidate = {
+    exactSource: true,
+    raw: {
+      id: "track-123",
+      url: sourceUrl,
+      file: "Exact Track.m4a",
+    },
+  };
+  const context = {
+    artistName: "Uploader Name",
+    trackName: "Exact Track",
+    durationMs: 180000,
+    sourceId: "track-123",
+    sourceUrl,
+  };
+
+  const exact = await validateDownloadedTrack("/tmp/does-not-exist.m4a", candidate, context);
+  assert.equal(exact.valid, false);
+  assert.match(exact.reason, /^quality-unknown:/);
+  assert.equal(exact.scores.matchReason, "exact-source");
+
+  const mismatched = await validateDownloadedTrack(
+    "/tmp/does-not-exist.m4a",
+    {
+      ...candidate,
+      raw: { ...candidate.raw, url: "https://soundcloud.com/artist/other-track" },
+    },
+    context,
+  );
+  assert.match(mismatched.reason, /^weak-artist-match:/);
+  assert.notEqual(mismatched.scores.matchReason, "exact-source");
 });
 
 test("validateDownloadedTrack scores path segments without weak-word inflation", async () => {

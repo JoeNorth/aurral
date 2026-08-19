@@ -9,6 +9,72 @@ const DEFAULT_BINARY = "yt-dlp";
 const SEARCH_LIMIT = 5;
 const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
 const AUDIO_FORMAT = "m4a";
+const SOUNDCLOUD_HOSTS = new Set(["soundcloud.com", "snd.sc"]);
+
+function createInputError(message, statusCode = 400) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
+export function normalizeSoundcloudUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) throw createInputError("SoundCloud track URL is required");
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw createInputError("Enter a valid SoundCloud track URL");
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  const soundcloudHost = SOUNDCLOUD_HOSTS.has(hostname) || hostname.endsWith(".soundcloud.com");
+  if (parsed.protocol !== "https:" || !soundcloudHost) {
+    throw createInputError("Only HTTPS SoundCloud URLs are supported");
+  }
+  parsed.hash = "";
+  return parsed.toString();
+}
+
+function readReleaseYear(metadata) {
+  const date = String(metadata?.release_date || metadata?.upload_date || "").trim();
+  const match = /^(\d{4})/.exec(date);
+  return match?.[1] || null;
+}
+
+export function parseSoundcloudTrackMetadata(metadata) {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    throw createInputError("SoundCloud returned invalid track metadata", 422);
+  }
+  if (Array.isArray(metadata.entries) || metadata._type === "playlist") {
+    throw createInputError("Enter a SoundCloud track URL, not a playlist or profile", 422);
+  }
+  const extractor = String(metadata.extractor_key || metadata.extractor || "").toLowerCase();
+  if (!extractor.startsWith("soundcloud")) {
+    throw createInputError("The URL did not resolve to a SoundCloud track", 422);
+  }
+  const sourceUrl = normalizeSoundcloudUrl(metadata.webpage_url || metadata.original_url);
+  const sourceId = String(metadata.id || "").trim();
+  const trackName = String(metadata.title || "").trim();
+  const artistName = String(
+    metadata.artist || metadata.creator || metadata.uploader || metadata.channel || "",
+  ).trim();
+  if (!sourceId || !trackName || !artistName) {
+    throw createInputError("SoundCloud track metadata is incomplete", 422);
+  }
+  const durationSec = Number(metadata.duration);
+  return {
+    artistName,
+    trackName,
+    albumName: String(metadata.album || "").trim() || null,
+    releaseYear: readReleaseYear(metadata),
+    durationMs:
+      Number.isFinite(durationSec) && durationSec > 0 ? Math.round(durationSec * 1000) : null,
+    artworkUrl: String(metadata.thumbnail || "").trim() || null,
+    sourceProvider: "soundcloud",
+    sourceId,
+    sourceUrl,
+  };
+}
 
 function getSettings() {
   return dbOps.getSettings()?.integrations?.ytdlp || {};
@@ -69,7 +135,9 @@ function runYtdlp(args, { timeoutMs = 120000, cwd } = {}) {
     child.on("close", (code) => {
       clearTimeout(timer);
       if (code !== 0) {
-        const detail = String(stderr || stdout || "").trim().slice(-500);
+        const detail = String(stderr || stdout || "")
+          .trim()
+          .slice(-500);
         reject(new Error(detail || `yt-dlp exited with code ${code}`));
         return;
       }
@@ -92,7 +160,10 @@ export async function testConnection({ force: _force = false } = {}) {
   }
   try {
     const { stdout } = await runYtdlp(["--version"], { timeoutMs: 15000 });
-    const version = String(stdout || "").trim().split(/\s+/)[0] || "ok";
+    const version =
+      String(stdout || "")
+        .trim()
+        .split(/\s+/)[0] || "ok";
     return { configured: true, ok: true, version, message: `yt-dlp ${version}` };
   } catch (error) {
     return { configured: true, ok: false, message: error?.message || String(error) };
@@ -132,12 +203,37 @@ export async function search(query, { limit = SEARCH_LIMIT } = {}) {
           Number.isFinite(Number(entry.duration)) && Number(entry.duration) > 0
             ? Number(entry.duration)
             : null,
-        liveStatus: String(entry.live_status || "").trim().toLowerCase(),
+        liveStatus: String(entry.live_status || "")
+          .trim()
+          .toLowerCase(),
       });
-    } catch {
-    }
+    } catch {}
   }
   return results;
+}
+
+export async function inspectSoundcloudUrl(value) {
+  if (!isConfigured()) {
+    throw createInputError("yt-dlp is not configured", 503);
+  }
+  const url = normalizeSoundcloudUrl(value);
+  let stdout;
+  try {
+    ({ stdout } = await runYtdlp(
+      ["--dump-single-json", "--no-download", "--no-playlist", "--no-warnings", "--", url],
+      { timeoutMs: 60000 },
+    ));
+  } catch (error) {
+    const wrapped = createInputError(error?.message || "Failed to inspect SoundCloud track", 422);
+    wrapped.cause = error;
+    throw wrapped;
+  }
+  try {
+    return parseSoundcloudTrackMetadata(JSON.parse(String(stdout || "").trim()));
+  } catch (error) {
+    if (error?.statusCode) throw error;
+    throw createInputError("SoundCloud returned invalid track metadata", 422);
+  }
 }
 
 function resolveStagingDir(jobId) {
@@ -205,6 +301,7 @@ export const ytdlpClient = {
   isEnabled: isYtdlpEnabled,
   testConnection,
   search,
+  inspectSoundcloudUrl,
   downloadAudio,
   cleanupStaging,
 };

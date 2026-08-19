@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { FileJson, Loader2, Music2, Upload } from "lucide-react";
+import { CloudDownload, FileJson, Link2, Loader2, Music2, Upload } from "lucide-react";
 import { ModalShell } from "../../../components/PlaylistModals";
 import {
   completeSpotifyOAuth,
@@ -7,8 +7,10 @@ import {
   getSpotifyImportStatus,
   getSpotifyPlaylists,
   importSharedPlaylist,
+  importSoundcloudTrack,
   importSpotifyPlaylist,
   previewSpotifyPlaylist,
+  previewSoundcloudTrack,
   startSpotifyOAuth,
 } from "../../../utils/api/endpoints/playlists.js";
 import { getAppBasePath, normalizeBasePathWithTrailingSlash } from "../../../utils/basePath";
@@ -98,9 +100,12 @@ function openSpotifyOAuthPopup(oauthUrl) {
       finish(tokens);
     };
 
-    const timeout = setTimeout(() => {
-      fail("Spotify sign-in timed out");
-    }, 5 * 60 * 1000);
+    const timeout = setTimeout(
+      () => {
+        fail("Spotify sign-in timed out");
+      },
+      5 * 60 * 1000,
+    );
   });
 }
 
@@ -110,7 +115,7 @@ export function PlaylistImportModal({
   onImported,
   showError,
   showSuccess,
-  existingPlaylistNames = [],
+  sharedPlaylists = [],
 }) {
   const [source, setSource] = useState("spotify");
   const [spotifyStatus, setSpotifyStatus] = useState({ connected: false, displayName: null });
@@ -126,13 +131,16 @@ export function PlaylistImportModal({
   const [previewLoading, setPreviewLoading] = useState(false);
   const [importing, setImporting] = useState(false);
   const [jsonReview, setJsonReview] = useState(null);
+  const [soundcloudUrl, setSoundcloudUrl] = useState("");
+  const [soundcloudTrack, setSoundcloudTrack] = useState(null);
+  const [soundcloudLoading, setSoundcloudLoading] = useState(false);
+  const [soundcloudDestination, setSoundcloudDestination] = useState("new");
+  const [soundcloudPlaylistName, setSoundcloudPlaylistName] = useState("");
 
   const reservedNameKeys = useMemo(
     () =>
-      new Set(
-        existingPlaylistNames.map((name) => normalizeNameKey(name)).filter(Boolean),
-      ),
-    [existingPlaylistNames],
+      new Set(sharedPlaylists.map((playlist) => normalizeNameKey(playlist?.name)).filter(Boolean)),
+    [sharedPlaylists],
   );
 
   const resetState = useCallback(() => {
@@ -146,6 +154,10 @@ export function PlaylistImportModal({
     setPreviewTrackCount(0);
     setPreviewSkipped(0);
     setJsonReview(null);
+    setSoundcloudUrl("");
+    setSoundcloudTrack(null);
+    setSoundcloudDestination("new");
+    setSoundcloudPlaylistName("");
   }, []);
 
   useEffect(() => {
@@ -176,7 +188,9 @@ export function PlaylistImportModal({
         setSpotifyStatus((prev) => ({ ...prev, connected: true, displayName: payload.user }));
       }
     } catch (error) {
-      showError?.(error?.response?.data?.message || error?.message || "Failed to load Spotify playlists");
+      showError?.(
+        error?.response?.data?.message || error?.message || "Failed to load Spotify playlists",
+      );
     } finally {
       setSpotifyLoading(false);
     }
@@ -205,7 +219,9 @@ export function PlaylistImportModal({
         setPreviewTracks(Array.isArray(payload?.previewTracks) ? payload.previewTracks : []);
       } catch (error) {
         if (!cancelled) {
-          showError?.(error?.response?.data?.message || error?.message || "Failed to preview playlist");
+          showError?.(
+            error?.response?.data?.message || error?.message || "Failed to preview playlist",
+          );
         }
       } finally {
         if (!cancelled) setPreviewLoading(false);
@@ -235,9 +251,7 @@ export function PlaylistImportModal({
       });
       await loadSpotifyPlaylists();
     } catch (error) {
-      showError?.(
-        error?.response?.data?.message || error?.message || "Failed to connect Spotify",
-      );
+      showError?.(error?.response?.data?.message || error?.message || "Failed to connect Spotify");
     } finally {
       setSpotifyLoading(false);
     }
@@ -312,6 +326,65 @@ export function PlaylistImportModal({
     }
   };
 
+  const handlePreviewSoundcloud = async () => {
+    const url = soundcloudUrl.trim();
+    if (!url || soundcloudLoading || importing) return;
+    setSoundcloudLoading(true);
+    setSoundcloudTrack(null);
+    try {
+      const payload = await previewSoundcloudTrack(url);
+      const track = payload?.track || null;
+      if (!track?.sourceUrl) {
+        throw new Error("SoundCloud returned no track metadata");
+      }
+      setSoundcloudTrack(track);
+      setSoundcloudUrl(track.sourceUrl);
+      setSoundcloudPlaylistName(
+        (current) =>
+          current || reserveUniqueFlowName(new Set(reservedNameKeys), "SoundCloud Downloads"),
+      );
+    } catch (error) {
+      showError?.(
+        error?.response?.data?.message ||
+          error?.response?.data?.error ||
+          error?.message ||
+          "Failed to inspect SoundCloud track",
+      );
+    } finally {
+      setSoundcloudLoading(false);
+    }
+  };
+
+  const handleImportSoundcloud = async () => {
+    if (!soundcloudTrack?.sourceUrl || importing) return;
+    const destinationPlaylistId = soundcloudDestination === "new" ? null : soundcloudDestination;
+    const name = soundcloudPlaylistName.trim();
+    if (!destinationPlaylistId && !name) {
+      showError?.("Playlist name is required");
+      return;
+    }
+    setImporting(true);
+    try {
+      await importSoundcloudTrack({
+        url: soundcloudTrack.sourceUrl,
+        destinationPlaylistId,
+        name: destinationPlaylistId ? undefined : name,
+      });
+      showSuccess?.(`Queued ${soundcloudTrack.trackName} from SoundCloud`);
+      onImported?.();
+      onClose?.();
+    } catch (error) {
+      showError?.(
+        error?.response?.data?.message ||
+          error?.response?.data?.error ||
+          error?.message ||
+          "Failed to import SoundCloud track",
+      );
+    } finally {
+      setImporting(false);
+    }
+  };
+
   const handleImportJson = async () => {
     if (!jsonReview || importing) return;
     setImporting(true);
@@ -359,15 +432,20 @@ export function PlaylistImportModal({
 
   const canImportSpotify = selectedPlaylist?.id && previewTrackCount > 0 && !previewLoading;
   const canImportJson = Boolean(jsonReview?.flows?.length);
+  const canImportSoundcloud =
+    Boolean(soundcloudTrack?.sourceUrl) &&
+    (soundcloudDestination !== "new" || Boolean(soundcloudPlaylistName.trim()));
 
   return (
     <ModalShell
       open={open}
-      title="Import playlist"
+      title="Import music"
       description={
         source === "spotify"
           ? "Connect Spotify, pick a playlist, and Aurral will queue downloads."
-          : "Import a JSON tracklist exported from Aurral or another tool."
+          : source === "soundcloud"
+            ? "Paste a SoundCloud track URL and download that exact track."
+            : "Import a JSON tracklist exported from Aurral or another tool."
       }
       onClose={onClose}
       disableClose={importing}
@@ -388,8 +466,26 @@ export function PlaylistImportModal({
               className="btn btn-primary btn-sm"
               disabled={importing || !canImportSpotify}
             >
-              {importing ? <Loader2 className="artist-icon-sm animate-spin" /> : <Music2 className="artist-icon-sm" />}
+              {importing ? (
+                <Loader2 className="artist-icon-sm animate-spin" />
+              ) : (
+                <Music2 className="artist-icon-sm" />
+              )}
               Import playlist
+            </button>
+          ) : source === "soundcloud" ? (
+            <button
+              type="button"
+              onClick={handleImportSoundcloud}
+              className="btn btn-primary btn-sm"
+              disabled={importing || soundcloudLoading || !canImportSoundcloud}
+            >
+              {importing ? (
+                <Loader2 className="artist-icon-sm animate-spin" />
+              ) : (
+                <CloudDownload className="artist-icon-sm" />
+              )}
+              Download track
             </button>
           ) : (
             <button
@@ -398,7 +494,11 @@ export function PlaylistImportModal({
               className="btn btn-primary btn-sm"
               disabled={importing || !canImportJson}
             >
-              {importing ? <Loader2 className="artist-icon-sm animate-spin" /> : <Upload className="artist-icon-sm" />}
+              {importing ? (
+                <Loader2 className="artist-icon-sm animate-spin" />
+              ) : (
+                <Upload className="artist-icon-sm" />
+              )}
               Import JSON
             </button>
           )}
@@ -413,6 +513,7 @@ export function PlaylistImportModal({
         >
           {[
             { id: "spotify", label: "Spotify" },
+            { id: "soundcloud", label: "SoundCloud URL" },
             { id: "json", label: "JSON file" },
           ].map((option) => (
             <button
@@ -467,7 +568,9 @@ export function PlaylistImportModal({
                 {selectedPlaylist ? (
                   <div className="playlist-import__selected">
                     <div className="playlist-import__selected-copy">
-                      <span className="playlist-import__selected-name">{selectedPlaylist.name}</span>
+                      <span className="playlist-import__selected-name">
+                        {selectedPlaylist.name}
+                      </span>
                       <span className="playlist-import__selected-meta">
                         {selectedPlaylist.trackCount} on Spotify
                       </span>
@@ -492,7 +595,11 @@ export function PlaylistImportModal({
                       onChange={(event) => setPlaylistQuery(event.target.value)}
                       disabled={importing || spotifyLoading}
                     />
-                    <div className="playlist-import__playlist-list" role="listbox" aria-label="Spotify playlists">
+                    <div
+                      className="playlist-import__playlist-list"
+                      role="listbox"
+                      aria-label="Spotify playlists"
+                    >
                       {spotifyLoading && playlists.length === 0 ? (
                         <div className="playlist-import__list-status">
                           <Loader2 className="artist-icon-sm animate-spin" />
@@ -525,7 +632,10 @@ export function PlaylistImportModal({
                 {selectedPlaylist ? (
                   <div className="playlist-import__config">
                     <div className="playlist-modal__fields">
-                      <label className="playlist-import__field-label" htmlFor="playlist-import-name">
+                      <label
+                        className="playlist-import__field-label"
+                        htmlFor="playlist-import-name"
+                      >
                         Name in Aurral
                       </label>
                       <input
@@ -539,7 +649,10 @@ export function PlaylistImportModal({
                     </div>
 
                     <div className="playlist-modal__fields">
-                      <label className="playlist-import__field-label" htmlFor="playlist-import-interval">
+                      <label
+                        className="playlist-import__field-label"
+                        htmlFor="playlist-import-interval"
+                      >
                         Sync
                       </label>
                       <select
@@ -577,8 +690,8 @@ export function PlaylistImportModal({
                           </div>
                           {previewSkipped > 0 ? (
                             <p className="playlist-import__summary-copy">
-                              Spotify also lists unavailable entries, podcast episodes, and duplicates
-                              Aurral cannot download.
+                              Spotify also lists unavailable entries, podcast episodes, and
+                              duplicates Aurral cannot download.
                             </p>
                           ) : null}
                           {previewTracks.length > 0 ? (
@@ -599,13 +712,126 @@ export function PlaylistImportModal({
               </>
             )}
           </div>
+        ) : source === "soundcloud" ? (
+          <div className="playlist-import__soundcloud">
+            <div className="playlist-import__config">
+              <div className="playlist-modal__fields">
+                <label
+                  className="playlist-import__field-label"
+                  htmlFor="playlist-import-soundcloud-url"
+                >
+                  SoundCloud track URL
+                </label>
+                <div className="playlist-import__url-row">
+                  <input
+                    id="playlist-import-soundcloud-url"
+                    type="url"
+                    className="input"
+                    placeholder="https://soundcloud.com/artist/track"
+                    value={soundcloudUrl}
+                    onChange={(event) => {
+                      setSoundcloudUrl(event.target.value);
+                      setSoundcloudTrack(null);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter") return;
+                      event.preventDefault();
+                      handlePreviewSoundcloud();
+                    }}
+                    disabled={soundcloudLoading || importing}
+                    autoComplete="url"
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={handlePreviewSoundcloud}
+                    disabled={!soundcloudUrl.trim() || soundcloudLoading || importing}
+                  >
+                    {soundcloudLoading ? (
+                      <Loader2 className="artist-icon-sm animate-spin" />
+                    ) : (
+                      <Link2 className="artist-icon-sm" />
+                    )}
+                    Inspect
+                  </button>
+                </div>
+                <p className="playlist-import__summary-copy">
+                  Only download tracks you have permission to save.
+                </p>
+              </div>
+            </div>
+
+            {soundcloudTrack ? (
+              <>
+                <div className="playlist-import__selected">
+                  <div className="playlist-import__selected-copy">
+                    <span className="playlist-import__selected-name">
+                      {soundcloudTrack.trackName}
+                    </span>
+                    <span className="playlist-import__selected-meta">
+                      {soundcloudTrack.artistName}
+                      {soundcloudTrack.durationMs
+                        ? ` · ${Math.round(soundcloudTrack.durationMs / 1000)} seconds`
+                        : ""}
+                    </span>
+                  </div>
+                  <span className="flow-page__badge flow-page__badge--count">SoundCloud</span>
+                </div>
+
+                <div className="playlist-import__config">
+                  <div className="playlist-modal__fields">
+                    <label
+                      className="playlist-import__field-label"
+                      htmlFor="playlist-import-soundcloud-destination"
+                    >
+                      Add to playlist
+                    </label>
+                    <select
+                      id="playlist-import-soundcloud-destination"
+                      className="input"
+                      value={soundcloudDestination}
+                      onChange={(event) => setSoundcloudDestination(event.target.value)}
+                      disabled={importing}
+                    >
+                      <option value="new">Create a new playlist</option>
+                      {sharedPlaylists.map((playlist) => (
+                        <option key={playlist.id} value={playlist.id}>
+                          {playlist.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {soundcloudDestination === "new" ? (
+                    <div className="playlist-modal__fields">
+                      <label
+                        className="playlist-import__field-label"
+                        htmlFor="playlist-import-soundcloud-name"
+                      >
+                        Playlist name
+                      </label>
+                      <input
+                        id="playlist-import-soundcloud-name"
+                        type="text"
+                        className="input"
+                        value={soundcloudPlaylistName}
+                        onChange={(event) => setSoundcloudPlaylistName(event.target.value)}
+                        disabled={importing}
+                      />
+                    </div>
+                  ) : null}
+                </div>
+              </>
+            ) : null}
+          </div>
         ) : (
           <div className="playlist-import__json">
             {!jsonReview ? (
               <label className="playlist-import__dropzone">
                 <FileJson className="playlist-import__dropzone-icon" aria-hidden="true" />
                 <span className="playlist-import__dropzone-title">Select JSON file</span>
-                <span className="playlist-import__dropzone-copy">Aurral exports and compatible tracklists</span>
+                <span className="playlist-import__dropzone-copy">
+                  Aurral exports and compatible tracklists
+                </span>
                 <input
                   type="file"
                   accept="application/json,.json"
@@ -635,7 +861,10 @@ export function PlaylistImportModal({
                 </div>
                 <div className="playlist-import__json-list">
                   {jsonReview.flows.map((flow, index) => (
-                    <div key={`${flow?.name || "flow"}-${index}`} className="playlist-import__json-item">
+                    <div
+                      key={`${flow?.name || "flow"}-${index}`}
+                      className="playlist-import__json-item"
+                    >
                       <span>{flow?.name || `Playlist ${index + 1}`}</span>
                       <span className="flow-page__badge flow-page__badge--count">
                         {Number(flow?.tracks?.length || 0)} tracks

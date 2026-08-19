@@ -1,13 +1,10 @@
 import path from "path";
 import fs from "fs/promises";
 import { downloadTracker } from "./weeklyFlow/weeklyFlowDownloadTracker.js";
-import { ytdlpClient } from "./ytdlpClient.js";
+import { normalizeSoundcloudUrl, ytdlpClient } from "./ytdlpClient.js";
 import { logger } from "./logger.js";
 import { validateDownloadedTrack } from "./weeklyFlow/weeklyFlowSoulseekMatcher.js";
-import {
-  buildYtdlpSearchQueries,
-  rankYtdlpResults,
-} from "./weeklyFlow/weeklyFlowYtdlpMatcher.js";
+import { buildYtdlpSearchQueries, rankYtdlpResults } from "./weeklyFlow/weeklyFlowYtdlpMatcher.js";
 import { resolvePlaylistRoot } from "./playlistPaths.js";
 import {
   buildResolvedPlaylistTrack as buildResolvedTrack,
@@ -29,6 +26,44 @@ function hasEnoughCandidates(aggregated, resolvedTrack) {
   return rankYtdlpResults(aggregated, resolvedTrack).some((entry) => entry.preDownloadValid);
 }
 
+export function buildExactYtdlpCandidate(exactSource, resolvedTrack) {
+  if (
+    String(exactSource?.provider || "")
+      .trim()
+      .toLowerCase() !== "soundcloud"
+  ) {
+    throw new Error("Unsupported exact yt-dlp source");
+  }
+  const url = normalizeSoundcloudUrl(exactSource?.url);
+  const title = String(resolvedTrack?.trackName || "").trim();
+  const channel = String(resolvedTrack?.artistName || "").trim();
+  const id = String(exactSource?.id || url).trim();
+  if (!title || !channel) {
+    throw new Error("Exact yt-dlp source is missing track metadata");
+  }
+  const durationMs = Number(resolvedTrack?.durationMs);
+  return {
+    raw: {
+      id,
+      title,
+      url,
+      channel,
+      durationSec: Number.isFinite(durationMs) && durationMs > 0 ? durationMs / 1000 : null,
+      file: title,
+    },
+    score: Number.MAX_SAFE_INTEGER,
+    scores: {
+      title: 100,
+      artist: 100,
+      duration: 100,
+      noise: 0,
+    },
+    resolvedAlbumName: resolvedTrack?.albumName || null,
+    preDownloadValid: true,
+    exactSource: true,
+  };
+}
+
 async function handleYtdlpSearch(payload, helpers) {
   const job = downloadTracker.getJob(payload.jobId);
   if (!job) return null;
@@ -48,6 +83,35 @@ async function handleYtdlpSearch(payload, helpers) {
     ...buildResolvedTrack(job, payload.track),
     upgradeForJobId: payload.upgradeForJobId || null,
   };
+  if (payload.exactSource) {
+    let candidate;
+    try {
+      candidate = buildExactYtdlpCandidate(payload.exactSource, resolvedTrack);
+    } catch (error) {
+      return helpers.failOrTryNextSource(
+        payload,
+        job,
+        error?.message || "Invalid exact yt-dlp source",
+      );
+    }
+    const denied = (Array.isArray(job.deniedRemoteSources) ? job.deniedRemoteSources : []).some(
+      (entry) =>
+        Array.isArray(entry) &&
+        entry[0] === "ytdlp" &&
+        String(entry[1] || "").trim() === candidate.raw.id,
+    );
+    if (denied) {
+      return helpers.failOrTryNextSource(payload, job, "The selected SoundCloud track was denied");
+    }
+    return {
+      ...payload,
+      phase: "download",
+      source: "ytdlp",
+      candidates: [candidate],
+      candidateIndex: 0,
+      resolvedTrack,
+    };
+  }
   const queries = buildYtdlpSearchQueries(resolvedTrack);
   const aggregated = [];
   const seen = new Set();
@@ -57,7 +121,9 @@ async function handleYtdlpSearch(payload, helpers) {
     try {
       const results = await ytdlpClient.search(query, { limit: 5 });
       mergeSearchResults(aggregated, seen, results, (entry) =>
-        String(entry.id || entry.url || "").trim().toLowerCase(),
+        String(entry.id || entry.url || "")
+          .trim()
+          .toLowerCase(),
       );
     } catch (error) {
       lastError = error?.message || String(error);

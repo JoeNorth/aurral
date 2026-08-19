@@ -169,7 +169,7 @@ export function FlowLibraryCreateMenu({
                 <span className="flow-page__library-create-action-copy">
                   <span className="flow-page__library-create-action-title">Import playlist</span>
                   <span className="flow-page__library-create-action-desc">
-                    From Spotify or a JSON export
+                    From Spotify, Apple Music, SoundCloud, or JSON
                   </span>
                 </span>
               </button>

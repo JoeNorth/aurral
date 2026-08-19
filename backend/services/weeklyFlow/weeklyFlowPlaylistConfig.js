@@ -454,6 +454,12 @@ export function normalizeImportSource(value) {
     provider,
     externalId: String(value.externalId || "").trim() || null,
     externalName: String(value.externalName || "").trim() || null,
+    externalType: String(value.externalType || "").trim() || null,
+    externalUrl: String(value.externalUrl || "").trim() || null,
+    storefront:
+      String(value.storefront || "")
+        .trim()
+        .toLowerCase() || null,
     syncEnabled: hasSync,
     syncIntervalHours: hasSync ? Math.min(Math.max(Math.round(syncIntervalHours), 1), 168) : 0,
     lastSyncAt: Number.isFinite(lastSyncAt) && lastSyncAt > 0 ? lastSyncAt : null,

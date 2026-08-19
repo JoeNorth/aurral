@@ -125,6 +125,22 @@ export const previewSpotifyPlaylist = (playlistId) =>
   postData("/playlists/import/spotify/preview", { playlistId });
 
 export const importSpotifyPlaylist = (payload) => postData("/playlists/import/spotify", payload);
+export const getAppleMusicImportStatus = () => getData("/playlists/import/apple-music/status");
+
+export const getAppleMusicDeveloperToken = () =>
+  getData("/playlists/import/apple-music/developer-token");
+
+export const connectAppleMusic = (musicUserToken) =>
+  postData("/playlists/import/apple-music/connect", { musicUserToken });
+
+export const disconnectAppleMusic = () => deleteData("/playlists/import/apple-music");
+
+export const getAppleMusicPlaylists = () => getData("/playlists/import/apple-music/playlists");
+
+export const previewAppleMusicImport = (payload) =>
+  postData("/playlists/import/apple-music/preview", payload);
+
+export const importAppleMusic = (payload) => postData("/playlists/import/apple-music", payload);
 
 export const previewSoundcloudTrack = (url) =>
   postData("/playlists/import/soundcloud/preview", { url });

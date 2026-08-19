@@ -19,7 +19,7 @@ Aurral does not write these files to your main music library.
 | Controls  | Schedule, source mix, focus, deep dive | None of the flow controls        |
 | Worker    | Shared download worker                 | Shared download worker           |
 
-Flows refresh on a schedule and use your flow settings. Static playlists come from Spotify, JSON files, or exported flow tracklists.
+Flows refresh on a schedule and use your flow settings. Static playlists come from Spotify, Apple Music, SoundCloud URLs, JSON files, or exported flow tracklists.
 
 Flow names and static playlist names must be unique across both types. Aurral uses the same bare name for Navidrome and Plex playlists.
 
@@ -29,7 +29,7 @@ Select **Re-search missing** from the playlist menu to try the track again.
 
 ## Import and Lidarr sync
 
-Use **Import playlist** for Spotify (connect in-app) or a JSON tracklist. See [Playlist imports](/using/playlist-imports/).
+Use **Import playlist** for Spotify, Apple Music, SoundCloud URLs, or a JSON tracklist. See [Playlist imports](/using/playlist-imports/).
 
 Flows can expose a **Lidarr import URL** so Lidarr polls the current flow tracklist as a custom import list. See [Lidarr: Import list feeds](/integrations/lidarr/#import-list-feeds).
 
@@ -107,4 +107,4 @@ yt-dlp can supply an acceptable first file. Aurral does not use yt-dlp for upgra
 ## Next steps
 
 - [Flows](/using/flows/): schedule, source mix, focus, and generation behavior
-- [Playlist imports](/using/playlist-imports/): Spotify connect, JSON formats, retries, and file reuse
+- [Playlist imports](/using/playlist-imports/): Spotify and Apple Music connections, public URLs, JSON formats, retries, and file reuse

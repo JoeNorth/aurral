@@ -1,6 +1,8 @@
 import { flowPlaylistConfig } from "../weeklyFlow/weeklyFlowPlaylistConfig.js";
 import { spotifyClient } from "../spotify/spotifyClient.js";
 import { parseSpotifyPlaylistItems } from "./spotifyTracks.js";
+import { appleMusicClient } from "../appleMusic/appleMusicService.js";
+import { parseAppleMusicResources } from "./appleMusicTracks.js";
 import { appendSharedPlaylistTracks } from "../weeklyFlow/weeklyFlowOperations.js";
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -13,12 +15,25 @@ export function isImportSourceDue(importSource, now = Date.now()) {
   const lastSyncAt = Number(importSource.lastSyncAt || 0);
   return !lastSyncAt || now - lastSyncAt >= intervalMs;
 }
+async function loadImportTracks(importSource, ownerUserId) {
+  const provider = String(importSource?.provider || "").trim();
+  if (provider === "spotify-playlist") {
+    const externalPlaylistId = String(importSource?.externalId || "").trim();
+    const items = await spotifyClient.listPlaylistTracks(ownerUserId, externalPlaylistId, {
+      forceRefresh: true,
+    });
+    return parseSpotifyPlaylistItems(items).tracks;
+  }
+  if (provider.startsWith("apple-music-")) {
+    const selection = await appleMusicClient.getImportSource(ownerUserId, importSource);
+    return parseAppleMusicResources(selection.resources).tracks;
+  }
+  const error = new Error(`Unsupported playlist import provider: ${provider || "unknown"}`);
+  error.statusCode = 400;
+  throw error;
+}
 
-export async function syncSharedPlaylistImport({
-  playlistId,
-  user,
-  force = false,
-} = {}) {
+export async function syncSharedPlaylistImport({ playlistId, user, force = false } = {}) {
   const playlist = flowPlaylistConfig.getSharedPlaylist(playlistId);
   if (!playlist?.importSource) {
     return { skipped: true, reason: "no-import-source" };
@@ -33,13 +48,7 @@ export async function syncSharedPlaylistImport({
   }
   const ownerUserId = playlist.ownerUserId ?? user?.id;
   try {
-    const externalPlaylistId = String(playlist.importSource?.externalId || "").trim();
-    const items = await spotifyClient.listPlaylistTracks(
-      ownerUserId,
-      externalPlaylistId,
-      { forceRefresh: true },
-    );
-    const tracks = parseSpotifyPlaylistItems(items).tracks;
+    const tracks = await loadImportTracks(playlist.importSource, ownerUserId);
     const result = await appendSharedPlaylistTracks({ playlistId: playlist.id, tracks });
     const nextImportSource = {
       ...playlist.importSource,
@@ -60,7 +69,7 @@ export async function syncSharedPlaylistImport({
     flowPlaylistConfig.updateSharedPlaylist(playlist.id, {
       importSource: {
         ...playlist.importSource,
-        lastSyncError: String(error?.message || "Spotify sync failed"),
+        lastSyncError: String(error?.message || "Playlist sync failed"),
       },
     });
     throw error;
@@ -84,7 +93,7 @@ export async function runDueImportSourceSyncs() {
     } catch (error) {
       results.push({
         playlistId: playlist.id,
-        error: String(error?.message || "Spotify sync failed"),
+        error: String(error?.message || "Playlist sync failed"),
       });
     }
   }

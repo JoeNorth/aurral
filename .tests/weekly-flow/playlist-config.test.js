@@ -278,6 +278,9 @@ test("preserves rich track metadata when shared playlists are updated", () => {
     durationMs: 201000,
     artistAliases: ["Alias B"],
     reason: null,
+    sourceProvider: null,
+    sourceId: null,
+    sourceUrl: null,
   });
 });
 

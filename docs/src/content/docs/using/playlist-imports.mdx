@@ -1,6 +1,6 @@
 ---
 title: Playlist imports
-description: Spotify connect, JSON formats, retries, and file reuse.
+description: Spotify, Apple Music, JSON formats, retries, and file reuse.
 ---
 
 Imported playlists are separate from flows.
@@ -31,6 +31,60 @@ Choose **None** for a fixed tracklist. You can change the schedule later from th
 Aurral stores the connection for each user. Use **Disconnect** in the import modal to revoke access.
 
 Allow the OAuth pop-up window if your browser blocks it. The Aurral origin must provide `oauth.html`.
+
+## Apple Music import
+
+Apple Music imports require an Apple Developer Program MusicKit key. Aurral can
+use a pre-generated developer token, or sign developer tokens from the MusicKit
+`.p8` private key.
+
+For automatic signing, pass these variables to the Aurral container:
+
+```text
+APPLE_MUSIC_TEAM_ID=YOUR_TEAM_ID
+APPLE_MUSIC_KEY_ID=YOUR_KEY_ID
+APPLE_MUSIC_PRIVATE_KEY_PATH=/config/AuthKey_YOUR_KEY_ID.p8
+APPLE_MUSIC_ORIGIN=https://aurral.example.com
+```
+
+Place the private key in the host directory mounted at `/config`. The origin is
+optional. When set, it must exactly match the browser origin used for Aurral.
+You can instead set `APPLE_MUSIC_DEVELOPER_TOKEN`, but Apple developer tokens
+expire within six months and then require manual replacement.
+
+Restart Aurral after changing the variables. The Apple Music tab reports missing
+configuration without exposing a token or private key.
+
+### Public playlist URL
+
+1. Open **Playlists > Create playlist > Import playlist**.
+2. Select **Apple Music > Public playlist URL**.
+3. Paste an HTTPS `music.apple.com` playlist URL.
+4. Select **Inspect**, review the track count, and start the import.
+
+Public playlists do not require an Apple Music sign-in. They still require the
+server's MusicKit developer credentials because Aurral reads them through the
+Apple Music catalog API.
+
+### Personal playlists or entire library
+
+1. Open **Apple Music > My library**.
+2. Select **Sign in with Apple Music** and complete Apple's Apple ID prompt.
+3. Choose **Entire Apple Music library** or one library playlist.
+4. Review the track count and start the import.
+
+Apple requires both the server developer token and the account's Music User
+Token for personal-library requests. Aurral validates and stores the Music User
+Token encrypted per Aurral user. **Disconnect** removes the stored connection
+and asks MusicKit to end the browser authorization.
+
+Apple Music supplies metadata only. Aurral searches its configured download
+sources for each song; it does not download protected Apple Music audio.
+
+Public playlists, personal playlists, and the entire library support the same
+sync schedule. A sync appends newly listed songs and queues their downloads. It
+does not delete local tracks removed from Apple Music. Choose **None** for a
+one-time snapshot.
 
 ### Manual CSV import
 

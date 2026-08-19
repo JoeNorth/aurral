@@ -11820,6 +11820,7 @@ button.native-library-genre-row:focus-visible {
 }
 
 .playlist-import__spotify,
+.playlist-import__apple,
 .playlist-import__soundcloud,
 .playlist-import__json {
   display: grid;

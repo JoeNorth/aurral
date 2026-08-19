@@ -1,19 +1,27 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { CloudDownload, FileJson, Link2, Loader2, Music2, Upload } from "lucide-react";
+import { CloudDownload, FileJson, Library, Link2, Loader2, Music2, Upload } from "lucide-react";
 import { ModalShell } from "../../../components/PlaylistModals";
 import {
   completeSpotifyOAuth,
+  connectAppleMusic,
+  disconnectAppleMusic,
   disconnectSpotify,
+  getAppleMusicDeveloperToken,
+  getAppleMusicImportStatus,
+  getAppleMusicPlaylists,
   getSpotifyImportStatus,
   getSpotifyPlaylists,
+  importAppleMusic,
   importSharedPlaylist,
   importSoundcloudTrack,
   importSpotifyPlaylist,
+  previewAppleMusicImport,
   previewSpotifyPlaylist,
   previewSoundcloudTrack,
   startSpotifyOAuth,
 } from "../../../utils/api/endpoints/playlists.js";
 import { getAppBasePath, normalizeBasePathWithTrailingSlash } from "../../../utils/basePath";
+import { authorizeAppleMusic, unauthorizeAppleMusic } from "../../../services/appleMusicAuth.js";
 import { parseFlowImportFile, reserveUniqueFlowName, normalizeNameKey } from "../flowPageUtils";
 
 const SYNC_INTERVAL_OPTIONS = [
@@ -136,6 +144,20 @@ export function PlaylistImportModal({
   const [soundcloudLoading, setSoundcloudLoading] = useState(false);
   const [soundcloudDestination, setSoundcloudDestination] = useState("new");
   const [soundcloudPlaylistName, setSoundcloudPlaylistName] = useState("");
+  const [appleStatus, setAppleStatus] = useState({
+    configured: false,
+    connected: false,
+    message: null,
+  });
+  const [appleMode, setAppleMode] = useState("url");
+  const [appleUrl, setAppleUrl] = useState("");
+  const [applePlaylists, setApplePlaylists] = useState([]);
+  const [applePlaylistQuery, setApplePlaylistQuery] = useState("");
+  const [appleSelection, setAppleSelection] = useState(null);
+  const [applePlaylistName, setApplePlaylistName] = useState("");
+  const [appleSyncIntervalHours, setAppleSyncIntervalHours] = useState(24);
+  const [applePreview, setApplePreview] = useState(null);
+  const [appleLoading, setAppleLoading] = useState(false);
 
   const reservedNameKeys = useMemo(
     () =>
@@ -158,6 +180,14 @@ export function PlaylistImportModal({
     setSoundcloudTrack(null);
     setSoundcloudDestination("new");
     setSoundcloudPlaylistName("");
+    setAppleMode("url");
+    setAppleUrl("");
+    setApplePlaylists([]);
+    setApplePlaylistQuery("");
+    setAppleSelection(null);
+    setApplePlaylistName("");
+    setAppleSyncIntervalHours(24);
+    setApplePreview(null);
   }, []);
 
   useEffect(() => {
@@ -167,12 +197,25 @@ export function PlaylistImportModal({
     }
     let cancelled = false;
     (async () => {
-      try {
-        const status = await getSpotifyImportStatus();
-        if (!cancelled) setSpotifyStatus(status || { connected: false });
-      } catch {
-        if (!cancelled) setSpotifyStatus({ connected: false });
-      }
+      const [spotifyResult, appleResult] = await Promise.allSettled([
+        getSpotifyImportStatus(),
+        getAppleMusicImportStatus(),
+      ]);
+      if (cancelled) return;
+      setSpotifyStatus(
+        spotifyResult.status === "fulfilled" && spotifyResult.value
+          ? spotifyResult.value
+          : { connected: false },
+      );
+      setAppleStatus(
+        appleResult.status === "fulfilled" && appleResult.value
+          ? appleResult.value
+          : {
+              configured: false,
+              connected: false,
+              message: "Unable to read Apple Music configuration",
+            },
+      );
     })();
     return () => {
       cancelled = true;
@@ -195,11 +238,35 @@ export function PlaylistImportModal({
       setSpotifyLoading(false);
     }
   }, [showError]);
+  const loadApplePlaylists = useCallback(async () => {
+    setAppleLoading(true);
+    try {
+      const payload = await getAppleMusicPlaylists();
+      setApplePlaylists(Array.isArray(payload?.playlists) ? payload.playlists : []);
+      setAppleStatus((current) => ({
+        ...current,
+        connected: true,
+        storefront: payload?.storefront || current.storefront || null,
+      }));
+    } catch (error) {
+      showError?.(
+        error?.response?.data?.message || error?.message || "Failed to load Apple Music playlists",
+      );
+    } finally {
+      setAppleLoading(false);
+    }
+  }, [showError]);
 
   useEffect(() => {
     if (!open || source !== "spotify" || !spotifyStatus.connected) return;
     loadSpotifyPlaylists();
   }, [open, source, spotifyStatus.connected, loadSpotifyPlaylists]);
+  useEffect(() => {
+    if (!open || source !== "apple" || appleMode !== "library" || !appleStatus.connected) {
+      return;
+    }
+    loadApplePlaylists();
+  }, [open, source, appleMode, appleStatus.connected, loadApplePlaylists]);
 
   useEffect(() => {
     if (!selectedPlaylist?.id) {
@@ -237,6 +304,19 @@ export function PlaylistImportModal({
     if (!query) return playlists;
     return playlists.filter((playlist) => playlist.name.toLowerCase().includes(query));
   }, [playlistQuery, playlists]);
+  const filteredApplePlaylists = useMemo(() => {
+    const sources = [
+      {
+        id: "library",
+        name: "Entire Apple Music library",
+        kind: "library",
+      },
+      ...applePlaylists,
+    ];
+    const query = applePlaylistQuery.trim().toLowerCase();
+    if (!query) return sources;
+    return sources.filter((playlist) => playlist.name.toLowerCase().includes(query));
+  }, [applePlaylistQuery, applePlaylists]);
 
   const handleConnectSpotify = async () => {
     setSpotifyLoading(true);
@@ -274,6 +354,105 @@ export function PlaylistImportModal({
   const handleSelectPlaylist = (playlist) => {
     setSelectedPlaylist(playlist);
     setPlaylistName(playlist?.name || "");
+  };
+  const inspectAppleSelection = async (selection) => {
+    if (!selection || appleLoading || importing) return;
+    setAppleLoading(true);
+    setAppleSelection(null);
+    setApplePreview(null);
+    try {
+      const request =
+        selection.kind === "catalog-playlist"
+          ? { kind: selection.kind, url: selection.url }
+          : selection.kind === "library-playlist"
+            ? { kind: selection.kind, playlistId: selection.id }
+            : { kind: "library" };
+      const payload = await previewAppleMusicImport(request);
+      const nextSelection = {
+        ...selection,
+        name: payload?.name || selection.name || "Apple Music",
+        source: payload?.source || null,
+      };
+      setAppleSelection(nextSelection);
+      setApplePlaylistName(nextSelection.name);
+      setApplePreview({
+        trackCount: Number(payload?.trackCount || 0),
+        skipped: Number(payload?.skipped || 0),
+        previewTracks: Array.isArray(payload?.previewTracks) ? payload.previewTracks : [],
+      });
+      if (selection.kind === "catalog-playlist" && payload?.source?.externalUrl) {
+        setAppleUrl(payload.source.externalUrl);
+      }
+    } catch (error) {
+      showError?.(
+        error?.response?.data?.message ||
+          error?.response?.data?.error ||
+          error?.message ||
+          "Failed to inspect Apple Music",
+      );
+    } finally {
+      setAppleLoading(false);
+    }
+  };
+
+  const handleInspectAppleUrl = () => {
+    const url = appleUrl.trim();
+    if (!url) return;
+    inspectAppleSelection({
+      kind: "catalog-playlist",
+      url,
+      name: "Apple Music playlist",
+    });
+  };
+
+  const handleConnectApple = async () => {
+    if (appleLoading || importing) return;
+    if (!appleStatus.configured) {
+      showError?.(appleStatus.message || "Apple Music is not configured");
+      return;
+    }
+    setAppleLoading(true);
+    try {
+      const { developerToken } = await getAppleMusicDeveloperToken();
+      const musicUserToken = await authorizeAppleMusic(developerToken);
+      const status = await connectAppleMusic(musicUserToken);
+      setAppleStatus((current) => ({ ...current, ...status, configured: true }));
+      setAppleMode("library");
+    } catch (error) {
+      showError?.(
+        error?.response?.data?.message ||
+          error?.response?.data?.error ||
+          error?.message ||
+          "Failed to connect Apple Music",
+      );
+    } finally {
+      setAppleLoading(false);
+    }
+  };
+
+  const handleDisconnectApple = async () => {
+    if (appleLoading || importing) return;
+    setAppleLoading(true);
+    const tokenPayload = await getAppleMusicDeveloperToken().catch(() => null);
+    try {
+      await disconnectAppleMusic();
+      await unauthorizeAppleMusic(tokenPayload?.developerToken).catch(() => {});
+      setAppleStatus((current) => ({
+        ...current,
+        connected: false,
+        storefront: null,
+        connectedAt: null,
+      }));
+      setApplePlaylists([]);
+      setAppleSelection(null);
+      setApplePreview(null);
+    } catch (error) {
+      showError?.(
+        error?.response?.data?.message || error?.message || "Failed to disconnect Apple Music",
+      );
+    } finally {
+      setAppleLoading(false);
+    }
   };
 
   const handleJsonFileChange = async (event) => {
@@ -320,6 +499,45 @@ export function PlaylistImportModal({
           error?.response?.data?.error ||
           error?.message ||
           "Failed to import Spotify playlist",
+      );
+    } finally {
+      setImporting(false);
+    }
+  };
+  const handleImportApple = async () => {
+    if (!appleSelection || !applePreview?.trackCount || importing) return;
+    const baseName = String(applePlaylistName || appleSelection.name || "").trim();
+    if (!baseName) {
+      showError?.("Playlist name is required");
+      return;
+    }
+    const finalName = reserveUniqueFlowName(new Set(reservedNameKeys), baseName);
+    const selection =
+      appleSelection.kind === "catalog-playlist"
+        ? {
+            kind: appleSelection.kind,
+            url: appleSelection.source?.externalUrl || appleSelection.url,
+          }
+        : appleSelection.kind === "library-playlist"
+          ? { kind: appleSelection.kind, playlistId: appleSelection.id }
+          : { kind: "library" };
+    setImporting(true);
+    try {
+      await importAppleMusic({
+        ...selection,
+        name: finalName,
+        syncEnabled: appleSyncIntervalHours > 0,
+        syncIntervalHours: appleSyncIntervalHours,
+      });
+      showSuccess?.(`Imported ${finalName} from Apple Music`);
+      onImported?.();
+      onClose?.();
+    } catch (error) {
+      showError?.(
+        error?.response?.data?.message ||
+          error?.response?.data?.error ||
+          error?.message ||
+          "Failed to import Apple Music",
       );
     } finally {
       setImporting(false);
@@ -431,6 +649,11 @@ export function PlaylistImportModal({
   };
 
   const canImportSpotify = selectedPlaylist?.id && previewTrackCount > 0 && !previewLoading;
+  const canImportApple =
+    Boolean(appleSelection) &&
+    Number(applePreview?.trackCount || 0) > 0 &&
+    Boolean(applePlaylistName.trim()) &&
+    !appleLoading;
   const canImportJson = Boolean(jsonReview?.flows?.length);
   const canImportSoundcloud =
     Boolean(soundcloudTrack?.sourceUrl) &&
@@ -443,9 +666,11 @@ export function PlaylistImportModal({
       description={
         source === "spotify"
           ? "Connect Spotify, pick a playlist, and Aurral will queue downloads."
-          : source === "soundcloud"
-            ? "Paste a SoundCloud track URL and download that exact track."
-            : "Import a JSON tracklist exported from Aurral or another tool."
+          : source === "apple"
+            ? "Import a public Apple Music playlist or connect your library."
+            : source === "soundcloud"
+              ? "Paste a SoundCloud track URL and download that exact track."
+              : "Import a JSON tracklist exported from Aurral or another tool."
       }
       onClose={onClose}
       disableClose={importing}
@@ -472,6 +697,20 @@ export function PlaylistImportModal({
                 <Music2 className="artist-icon-sm" />
               )}
               Import playlist
+            </button>
+          ) : source === "apple" ? (
+            <button
+              type="button"
+              onClick={handleImportApple}
+              className="btn btn-primary btn-sm"
+              disabled={importing || !canImportApple}
+            >
+              {importing ? (
+                <Loader2 className="artist-icon-sm animate-spin" />
+              ) : (
+                <Library className="artist-icon-sm" />
+              )}
+              Import tracks
             </button>
           ) : source === "soundcloud" ? (
             <button
@@ -513,6 +752,7 @@ export function PlaylistImportModal({
         >
           {[
             { id: "spotify", label: "Spotify" },
+            { id: "apple", label: "Apple Music" },
             { id: "soundcloud", label: "SoundCloud URL" },
             { id: "json", label: "JSON file" },
           ].map((option) => (
@@ -708,6 +948,286 @@ export function PlaylistImportModal({
                       )}
                     </div>
                   </div>
+                ) : null}
+              </>
+            )}
+          </div>
+        ) : source === "apple" ? (
+          <div className="playlist-import__apple">
+            {!appleStatus.configured ? (
+              <div className="playlist-import__empty">
+                <div className="playlist-import__empty-icon" aria-hidden="true">
+                  <Library />
+                </div>
+                <p className="playlist-import__empty-title">Apple Music setup required</p>
+                <p className="playlist-import__empty-copy">
+                  An administrator must configure an Apple MusicKit key before public playlists or
+                  personal libraries can be imported.
+                </p>
+                {appleStatus.message ? (
+                  <p className="playlist-import__summary-copy">{appleStatus.message}</p>
+                ) : null}
+              </div>
+            ) : (
+              <>
+                <div
+                  className="artist-segmented playlist-import__apple-mode"
+                  role="group"
+                  aria-label="Apple Music source"
+                >
+                  {[
+                    { id: "url", label: "Public playlist URL" },
+                    { id: "library", label: "My library" },
+                  ].map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      className={`artist-segmented-button${
+                        appleMode === option.id ? " is-active" : ""
+                      }`}
+                      onClick={() => {
+                        setAppleMode(option.id);
+                        setAppleSelection(null);
+                        setApplePreview(null);
+                      }}
+                      disabled={appleLoading || importing}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+
+                {appleMode === "url" ? (
+                  <div className="playlist-import__config">
+                    <div className="playlist-modal__fields">
+                      <label
+                        className="playlist-import__field-label"
+                        htmlFor="playlist-import-apple-url"
+                      >
+                        Public Apple Music playlist URL
+                      </label>
+                      <div className="playlist-import__url-row">
+                        <input
+                          id="playlist-import-apple-url"
+                          type="url"
+                          className="input"
+                          placeholder="https://music.apple.com/us/playlist/.../pl..."
+                          value={appleUrl}
+                          onChange={(event) => {
+                            setAppleUrl(event.target.value);
+                            setAppleSelection(null);
+                            setApplePreview(null);
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key !== "Enter") return;
+                            event.preventDefault();
+                            handleInspectAppleUrl();
+                          }}
+                          disabled={appleLoading || importing}
+                          autoComplete="url"
+                        />
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm"
+                          onClick={handleInspectAppleUrl}
+                          disabled={!appleUrl.trim() || appleLoading || importing}
+                        >
+                          {appleLoading ? (
+                            <Loader2 className="artist-icon-sm animate-spin" />
+                          ) : (
+                            <Link2 className="artist-icon-sm" />
+                          )}
+                          Inspect
+                        </button>
+                      </div>
+                      <p className="playlist-import__summary-copy">
+                        Public playlists do not require an Apple Music sign-in.
+                      </p>
+                    </div>
+                  </div>
+                ) : !appleStatus.connected ? (
+                  <div className="playlist-import__empty">
+                    <div className="playlist-import__empty-icon" aria-hidden="true">
+                      <Library />
+                    </div>
+                    <p className="playlist-import__empty-title">Connect your Apple Music account</p>
+                    <p className="playlist-import__empty-copy">
+                      Sign in with your Apple ID to import a playlist or every song in your cloud
+                      music library.
+                    </p>
+                    <button
+                      type="button"
+                      className="btn btn-primary btn-sm"
+                      onClick={handleConnectApple}
+                      disabled={appleLoading || importing}
+                    >
+                      {appleLoading ? <Loader2 className="artist-icon-sm animate-spin" /> : null}
+                      Sign in with Apple Music
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <div className="playlist-import__account">
+                      <span className="playlist-import__account-label">
+                        Apple Music connected
+                        {appleStatus.storefront ? (
+                          <>
+                            {" "}
+                            · <strong>{appleStatus.storefront.toUpperCase()}</strong>
+                          </>
+                        ) : null}
+                      </span>
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        onClick={handleDisconnectApple}
+                        disabled={appleLoading || importing}
+                      >
+                        Disconnect
+                      </button>
+                    </div>
+
+                    {!appleSelection ? (
+                      <div className="playlist-import__list-panel">
+                        <input
+                          id="playlist-import-apple-search"
+                          type="search"
+                          className="input playlist-import__search"
+                          placeholder="Search your Apple Music playlists"
+                          value={applePlaylistQuery}
+                          onChange={(event) => setApplePlaylistQuery(event.target.value)}
+                          disabled={appleLoading || importing}
+                        />
+                        <div
+                          className="playlist-import__playlist-list"
+                          role="listbox"
+                          aria-label="Apple Music playlists"
+                        >
+                          {appleLoading && applePlaylists.length === 0 ? (
+                            <div className="playlist-import__list-status">
+                              <Loader2 className="artist-icon-sm animate-spin" />
+                              <span>Loading playlists…</span>
+                            </div>
+                          ) : filteredApplePlaylists.length === 0 ? (
+                            <div className="playlist-import__list-status">No playlists found</div>
+                          ) : (
+                            filteredApplePlaylists.map((playlist) => (
+                              <button
+                                key={`${playlist.kind}-${playlist.id}`}
+                                type="button"
+                                role="option"
+                                aria-selected={false}
+                                className="playlist-import__playlist-option"
+                                onClick={() => inspectAppleSelection(playlist)}
+                                disabled={appleLoading || importing}
+                              >
+                                <span className="playlist-import__playlist-name">
+                                  {playlist.name}
+                                </span>
+                                <span className="flow-page__badge flow-page__badge--count">
+                                  {playlist.kind === "library" ? "All songs" : "Playlist"}
+                                </span>
+                              </button>
+                            ))
+                          )}
+                        </div>
+                      </div>
+                    ) : null}
+                  </>
+                )}
+
+                {appleSelection ? (
+                  <>
+                    <div className="playlist-import__selected">
+                      <div className="playlist-import__selected-copy">
+                        <span className="playlist-import__selected-name">
+                          {appleSelection.name}
+                        </span>
+                        <span className="playlist-import__selected-meta">
+                          {Number(applePreview?.trackCount || 0)} importable songs
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => {
+                          setAppleSelection(null);
+                          setApplePreview(null);
+                        }}
+                        disabled={appleLoading || importing}
+                      >
+                        Change
+                      </button>
+                    </div>
+
+                    <div className="playlist-import__config">
+                      <div className="playlist-modal__fields">
+                        <label
+                          className="playlist-import__field-label"
+                          htmlFor="playlist-import-apple-name"
+                        >
+                          Name in Aurral
+                        </label>
+                        <input
+                          id="playlist-import-apple-name"
+                          type="text"
+                          className="input"
+                          value={applePlaylistName}
+                          onChange={(event) => setApplePlaylistName(event.target.value)}
+                          disabled={importing}
+                        />
+                      </div>
+
+                      <div className="playlist-modal__fields">
+                        <label
+                          className="playlist-import__field-label"
+                          htmlFor="playlist-import-apple-interval"
+                        >
+                          Sync
+                        </label>
+                        <select
+                          id="playlist-import-apple-interval"
+                          className="input"
+                          value={appleSyncIntervalHours}
+                          onChange={(event) =>
+                            setAppleSyncIntervalHours(Number(event.target.value))
+                          }
+                          disabled={importing}
+                        >
+                          {SYNC_INTERVAL_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="playlist-import__summary">
+                        <div className="playlist-import__summary-top">
+                          <span className="flow-page__badge flow-page__badge--count">
+                            {Number(applePreview?.trackCount || 0)} importable
+                          </span>
+                          {Number(applePreview?.skipped || 0) > 0 ? (
+                            <span className="playlist-import__summary-note">
+                              {applePreview.skipped} skipped
+                            </span>
+                          ) : null}
+                        </div>
+                        {applePreview?.previewTracks?.length > 0 ? (
+                          <p className="playlist-import__summary-sample">
+                            {applePreview.previewTracks
+                              .map((track) => `${track.artistName} — ${track.trackName}`)
+                              .join(" · ")}
+                            {applePreview.trackCount > applePreview.previewTracks.length
+                              ? ` · +${
+                                  applePreview.trackCount - applePreview.previewTracks.length
+                                } more`
+                              : ""}
+                          </p>
+                        ) : null}
+                      </div>
+                    </div>
+                  </>
                 ) : null}
               </>
             )}

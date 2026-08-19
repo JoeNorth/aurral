@@ -7,6 +7,7 @@ import { registerFlows } from "./handlers/flows.js";
 import { registerSharedPlaylists } from "./handlers/sharedPlaylists.js";
 import { registerSpotifyImport } from "./handlers/spotifyImport.js";
 import { registerSoundcloudImport } from "./handlers/soundcloudImport.js";
+import { registerAppleMusicImport } from "./handlers/appleMusicImport.js";
 import { registerJobs } from "./handlers/jobs.js";
 
 const router = express.Router();
@@ -22,6 +23,7 @@ registerFlows(router);
 registerSharedPlaylists(router);
 registerSpotifyImport(router);
 registerSoundcloudImport(router);
+registerAppleMusicImport(router);
 registerJobs(router);
 
 export default router;

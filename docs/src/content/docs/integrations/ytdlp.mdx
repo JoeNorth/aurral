@@ -3,7 +3,7 @@ title: yt-dlp
 description: YouTube and web-backed downloads for flows and playlists.
 ---
 
-yt-dlp is the built-in fallback download source. It searches YouTube for artist and title matches.
+yt-dlp is the built-in fallback download source. It searches YouTube for artist and title matches, and it can download an exact SoundCloud track selected by URL.
 
 yt-dlp extracts audio with ffmpeg. Aurral stages the audio outside your media paths, validates and tags it, and then imports it into your Downloads Folder.
 
@@ -23,6 +23,18 @@ For a bare-metal installation, install both programs on the host. Make sure that
 
 The yt-dlp default priority is `50`. The slskd default is `10`. The Usenet default is `20`.
 
+## Import a SoundCloud track
+
+1. Open **Library > Playlists**.
+2. Select **Create playlist > Import playlist > SoundCloud URL**.
+3. Paste a public SoundCloud track URL and select **Inspect**.
+4. Review the resolved title, uploader, and duration.
+5. Choose an existing playlist or name a new playlist, then select **Download track**.
+
+Aurral downloads the inspected URL directly instead of searching for a similarly named track. The resulting file is stored in the Downloads Folder, tagged for the media library, and reused by later playlists rather than downloaded again.
+
+Only download tracks that you have permission to save. Playlist, profile, private, blocked, and non-SoundCloud URLs are rejected.
+
 ## Behavior
 
 Aurral tries download sources in priority order. With default settings, Aurral tries configured slskd and Usenet sources first.
@@ -31,9 +43,9 @@ yt-dlp downloads tracks that the other sources cannot find. It can also be the o
 
 Aurral ranks results by title, artist, duration, and noise filters. It skips karaoke, live loops, and similar unwanted results.
 
-Aurral validates downloaded audio with the same track validation that it uses for other sources.
+Aurral validates downloaded audio with the same identity, duration, and media checks that it uses for other sources.
 
-Aurral also applies the global Quality Profile. It rejects the final file if its measured M4A quality is not an enabled tier.
+Search-based downloads also apply the global Quality Profile. An explicitly selected SoundCloud track keeps recognized, playable source audio even when its measured bitrate is below the automatic profile floor; there is no alternate candidate to upgrade during an exact import.
 
 After validation, Aurral writes the playlist's title, artist, album, album artist, year, and track number into the audio file. This metadata lets tag-based libraries such as Navidrome organize yt-dlp downloads correctly.
 

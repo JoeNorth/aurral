@@ -491,7 +491,7 @@ async function findFileRecursive(dir, fileName, expectedSizeBytes, depth = 0, ma
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
   } catch {
-    return collected;
+    return depth > 0 || matches !== null ? collected : null;
   }
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name);
@@ -565,7 +565,7 @@ export async function locateCompletedDownload(slskdRoot, playlistRoot, remoteFil
       parseSlskdRemoteFile(remoteFile).fileName,
       expectedSizeBytes,
     );
-    if (found) return found;
+    if (typeof found === "string" && found) return found;
   }
   return null;
 }
@@ -1075,7 +1075,7 @@ async function handleFinalize(payload) {
     expectedSizeBytes: Number(candidate?.raw?.size || 0),
     transfer,
   });
-  if (!sourcePath) {
+  if (typeof sourcePath !== "string" || !sourcePath.trim()) {
     const searchRoot = slskdRoot || playlistRoot;
     const [predictedPath] = predictSlskdLocalPathCandidates(searchRoot, remoteFile);
     const expectedPath = predictedPath || fileName;

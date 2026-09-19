@@ -6,6 +6,7 @@ import path from "path";
 import {
   setupIsolatedBackend,
   cleanupIsolatedState,
+  importFromRepo,
   resetDatabase,
 } from "../helpers/backendTestHarness.js";
 
@@ -45,7 +46,12 @@ const {
   orderJobsBySharedPlaylistTracks,
   rebuildSharedPlaylistTracksFromJobs,
 } = playlistConfigModule;
-const { appendSharedPlaylistTracks, processWeeklyFlowOperation, updateSharedPlaylist } = operationsModule;
+const {
+  appendSharedPlaylistTracks,
+  markLatestWeeklyFlowOperationToken,
+  processWeeklyFlowOperation,
+  updateSharedPlaylist,
+} = operationsModule;
 const { weeklyFlowWorker } = workerModule;
 const { playlistSource } = playlistSourceModule;
 const { playlistManager } = playlistManagerModule;
@@ -55,6 +61,27 @@ const { lastfmStationClient } = lastfmStationsModule;
 const { syncSharedPlaylistImport } = importSyncModule;
 
 const weeklyFlowRoot = process.env.WEEKLY_FLOW_FOLDER;
+
+test("mutation release unblocks every playlist and prunes after an unblock error", async (t) => {
+  const { beginPlaylistMutation } = await importFromRepo(
+    "backend/services/weeklyFlow/weeklyFlowMutationGuards.js",
+  );
+  const calls = [];
+  t.mock.method(weeklyFlowWorker, "blockPlaylist", async () => true);
+  t.mock.method(weeklyFlowWorker, "clearIncompleteRetry", async () => {});
+  t.mock.method(weeklyFlowWorker, "waitForPlaylistIdle", async () => {});
+  t.mock.method(weeklyFlowWorker, "unblockPlaylist", async (id) => {
+    calls.push(`unblock:${id}`);
+    if (id === "first") throw new Error("unblock failed");
+  });
+  t.mock.method(weeklyFlowWorker, "pruneOrphanedJobState", async () => {
+    calls.push("prune");
+  });
+
+  const release = await beginPlaylistMutation(["first", "second"], { clearPending: false });
+  await assert.rejects(release(), /unblock failed/);
+  assert.deepEqual(calls, ["unblock:first", "unblock:second", "prune"]);
+});
 
 async function writeReusableTrack(track, playlistType = "source-playlist") {
   const sourcePath = path.join(
@@ -240,6 +267,49 @@ test("flow refresh clears playback before downloads finish", async () => {
     flowPlaylistConfig.scheduleNextRun = originalScheduleNextRun;
     weeklyFlowWorker.stop();
   }
+});
+
+test("a failed flow plan leaves the current playlist and jobs untouched", async () => {
+  const originalBuildPlan = playlistSource.buildFlowRunPlan;
+  const originalReset = playlistManager.weeklyReset;
+  let resets = 0;
+  try {
+    dbOps.updateSettings({
+      ...dbOps.getSettings(),
+      integrations: {
+        lastfm: { apiKey: "test" },
+        slskd: { enabled: true, url: "http://slskd", apiKey: "test" },
+      },
+    });
+    const flow = flowPlaylistConfig.createFlow({
+      name: "Plan Failure",
+      mix: { discover: 100, mix: 0, trending: 0, focus: 0 },
+      size: 1,
+      scheduleDays: [1],
+    });
+    flowPlaylistConfig.setEnabled(flow.id, true);
+    const jobId = downloadTracker.addJob({ artistName: "Artist", trackName: "Track" }, flow.id);
+    playlistSource.buildFlowRunPlan = async () => { throw new Error("Planning unavailable"); };
+    playlistManager.weeklyReset = async () => { resets += 1; };
+
+    await assert.rejects(
+      processWeeklyFlowOperation({ kind: "scheduled-flow-refresh", flowId: flow.id }),
+      /Planning unavailable/,
+    );
+    assert.equal(resets, 0);
+    assert.ok(downloadTracker.getJob(jobId));
+  } finally {
+    playlistSource.buildFlowRunPlan = originalBuildPlan;
+    playlistManager.weeklyReset = originalReset;
+    weeklyFlowWorker.stop();
+  }
+});
+
+test("flow operation tokens are stored separately for each playlist", () => {
+  markLatestWeeklyFlowOperationToken("flow:one", "first");
+  markLatestWeeklyFlowOperationToken("flow:two", "second");
+  assert.equal(dbOps.getJSONSetting("weeklyFlowOperationTokens:flow%3Aone"), "first");
+  assert.equal(dbOps.getJSONSetting("weeklyFlowOperationTokens:flow%3Atwo"), "second");
 });
 
 test("deleting a track keeps remaining import order in config", async () => {

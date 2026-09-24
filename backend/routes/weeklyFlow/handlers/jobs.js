@@ -27,6 +27,9 @@ import {
   sanitizePathPart,
 } from "../../../services/playlistDownloadUtils.js";
 import { finalizePipelineJobSuccess } from "../../../services/pipelineHelpers.js";
+import {
+  withPipelineCommitLock,
+} from "../../../services/weeklyFlow/weeklyFlowDownloadCancellation.js";
 import path from "path";
 import fs from "fs/promises";
 import { invalidateRequestsCache } from "../../requests.js";
@@ -38,6 +41,8 @@ import {
   runQualityUpgradeCheck,
 } from "../../../services/qualityProfileService.js";
 import { getCanonicalTrackOwnershipBatch } from "../../../services/libraryQueryService.js";
+import { logger } from "../../../services/logger.js";
+import { clearAllDownloadJobs } from "../../../services/weeklyFlow/weeklyFlowDownloadCancellationService.js";
 import {
   isFlowOwnerProcess,
   requestFlowOwner,
@@ -309,16 +314,29 @@ export function registerJobs(router) {
     const finalName = `${sanitizePathPart(job.trackName, "Unknown Track")}${ext || ".mp3"}`;
     const finalPath = path.join(finalDir, finalName);
     try {
-      const committedPath = await commitImportToPlaylistLibrary(sourcePath, finalPath);
-      await finalizePipelineJobSuccess({
-        downloadTracker,
-        job,
-        committedFinalPath: committedPath,
-        album: job.albumName,
-      });
+      const committed = await withPipelineCommitLock(
+        {
+          jobId: job.id,
+          playlistId,
+          playlistGeneration: job.playlistGeneration,
+        },
+        async () => {
+          const committedPath = await commitImportToPlaylistLibrary(sourcePath, finalPath);
+          await finalizePipelineJobSuccess({
+            downloadTracker,
+            job,
+            committedFinalPath: committedPath,
+            album: job.albumName,
+          });
+          return committedPath;
+        },
+      );
+      if (committed.cancelled) {
+        return res.status(409).json({ error: "Download job was removed" });
+      }
       await classifyQualityJob(downloadTracker.getJob(job.id));
       invalidateRequestsCache();
-      res.json({ success: true, path: committedPath });
+      res.json({ success: true, path: committed.result });
     } catch (error) {
       res.status(500).json({ error: "Import failed", message: error.message });
     }
@@ -350,9 +368,18 @@ export function registerJobs(router) {
     res.json({ success: true });
   });
 
-  router.delete("/jobs/all", requireAdmin, (req, res) => {
-    const count = downloadTracker.clearAll();
-    res.json({ success: true, cleared: count });
+  router.delete("/jobs/all", requireAdmin, async (req, res) => {
+    try {
+      const count = await clearAllDownloadJobs(downloadTracker);
+      return res.json({ success: true, cleared: count });
+    } catch (error) {
+      logger.error("weekly-flow", "Could not safely clear download jobs", {
+        reason: error?.message || String(error),
+      });
+      return res.status(500).json({
+        error: "Some provider work could not be cancelled. Affected jobs were stopped in Aurral and marked failed. Retry clearing jobs after fixing the provider connection.",
+      });
+    }
   });
 
   router.post("/reset", requireAdmin, async (req, res) => {

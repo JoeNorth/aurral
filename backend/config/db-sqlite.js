@@ -158,6 +158,7 @@ db.exec(`
     album_track_titles TEXT,
     artist_aliases TEXT,
     playlist_id TEXT NOT NULL,
+    playlist_generation INTEGER NOT NULL DEFAULT 0,
     playlist_type TEXT,
     status TEXT NOT NULL,
     staging_path TEXT,
@@ -187,6 +188,37 @@ db.exec(`
     quality_upgrade_checked_at INTEGER,
     upgrade_for_job_id TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS weekly_flow_download_cancellations (
+    playlist_id TEXT PRIMARY KEY,
+    generation INTEGER NOT NULL DEFAULT 0,
+    state TEXT NOT NULL DEFAULT 'active',
+    changed_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS weekly_flow_download_job_cancellations (
+    job_id TEXT PRIMARY KEY,
+    cancelled_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_weekly_flow_download_job_cancellations_time
+    ON weekly_flow_download_job_cancellations(cancelled_at);
+
+  CREATE TABLE IF NOT EXISTS weekly_flow_download_provider_work (
+    job_id TEXT NOT NULL,
+    playlist_id TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL,
+    work_id TEXT NOT NULL,
+    username TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (job_id, provider, work_id, username)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_weekly_flow_download_provider_work_job
+    ON weekly_flow_download_provider_work(job_id, provider);
+
+  CREATE INDEX IF NOT EXISTS idx_weekly_flow_download_provider_work_playlist
+    ON weekly_flow_download_provider_work(playlist_id, provider);
 
   CREATE TABLE IF NOT EXISTS deezer_mbid_cache (
     cache_key TEXT PRIMARY KEY,
@@ -554,6 +586,11 @@ const tableColumns = db
   .all()
   .map((column) => column.name);
 
+if (!tableColumns.includes("playlist_generation")) {
+  tryAddColumn(
+    "ALTER TABLE playlist_download_jobs ADD COLUMN playlist_generation INTEGER NOT NULL DEFAULT 0",
+  );
+}
 if (!tableColumns.includes("album_name")) {
   tryAddColumn("ALTER TABLE playlist_download_jobs ADD COLUMN album_name TEXT");
 }

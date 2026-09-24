@@ -31,6 +31,8 @@ import {
   getLibraryManagementEntry,
   setLibraryManagement,
 } from "./libraryManagementStore.js";
+import { cancelDownloadWorkForJobs } from "./weeklyFlow/weeklyFlowDownloadCancellationService.js";
+import { removePlaylistFileIfUnshared } from "./weeklyFlow/weeklyFlowFileReuse.js";
 const normalizeTypeName = (value) =>
   String(value || "")
     .toLowerCase()
@@ -268,7 +270,7 @@ function isLidarrNotFoundError(error) {
     /\b404\b|not found in lidarr/i.test(String(error?.message || ""));
 }
 
-function removeLibraryDownloadJobs(track) {
+async function removeLibraryDownloadJobs(track) {
   const normalize = (value) => String(value || "").trim().toLocaleLowerCase();
   const trackMbid = normalize(track?.mbid);
   const artistName = normalize(track?.artistName);
@@ -285,14 +287,22 @@ function removeLibraryDownloadJobs(track) {
       : matchesName;
     if (matchesTrack) {
       removedJobIds.add(job.id);
-      downloadTracker.removeJob(job.id);
     }
   }
-  for (const job of jobs) {
-    if (job.upgradeForJobId && removedJobIds.has(job.upgradeForJobId)) {
-      downloadTracker.removeJob(job.id);
+  const jobsToRemove = jobs.filter(
+    (job) => removedJobIds.has(job.id) || removedJobIds.has(job.upgradeForJobId),
+  );
+  if (jobsToRemove.length === 0) return [];
+  await cancelDownloadWorkForJobs(jobsToRemove);
+  const committedPaths = new Set();
+  for (const job of jobsToRemove) {
+    const completedJob = downloadTracker.getJob(job.id);
+    if (completedJob?.managedBy !== "lidarr" && completedJob?.finalPath) {
+      committedPaths.add(completedJob.finalPath);
     }
+    downloadTracker.removeJob(job.id);
   }
+  return [...committedPaths];
 }
 
 function buildTrackFileIndex(trackFiles) {
@@ -2387,17 +2397,43 @@ export class LibraryManager {
       const aurralFiles = track.files.filter((file) => file.source === "aurral" && file.path);
       const lidarrFiles = track.files.filter((file) => file.source === "lidarr" && file.available);
       if (aurralFiles.length > 0 && lidarrFiles.length === 0) {
-        const paths = [...new Set(aurralFiles.map((file) => file.path))];
-        removeLibraryDownloadJobs(track);
+        let committedPaths;
+        try {
+          committedPaths = await removeLibraryDownloadJobs(track);
+        } catch (error) {
+          logger.error("library", `[LibraryManager] Failed to cancel track downloads: ${error.message}`);
+          return {
+            success: false,
+            code: "download_cancellation_failed",
+            error: error.message,
+          };
+        }
+        const paths = [...new Set([
+          ...aurralFiles.map((file) => file.path),
+          ...committedPaths,
+        ])];
         try {
           const deletionResults = await Promise.allSettled(paths.map(async (filePath) => {
-            try {
-              await fsp.unlink(filePath);
-              return filePath;
-            } catch (error) {
-              if (error?.code === "ENOENT") return filePath;
-              throw error;
+            const removal = await removePlaylistFileIfUnshared(filePath, "library", {
+              deleteIfUnshared: true,
+              protectPlayback: false,
+            });
+            if (removal.action === "skipped") {
+              const resolvedPath = path.resolve(filePath);
+              const referencedByAnotherJob = downloadTracker.getAll().some((job) =>
+                job.status === "done" &&
+                typeof job.finalPath === "string" &&
+                path.resolve(job.finalPath) === resolvedPath,
+              );
+              if (!referencedByAnotherJob) {
+                try {
+                  await fsp.unlink(filePath);
+                } catch (error) {
+                  if (error?.code !== "ENOENT") throw error;
+                }
+              }
             }
+            return filePath;
           }));
           const reconciledPaths = deletionResults
             .filter((result) => result.status === "fulfilled")

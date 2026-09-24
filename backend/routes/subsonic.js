@@ -396,7 +396,7 @@ async function handleSubsonicRequest(req, res) {
     }
     try {
       const playlist = playlistId
-        ? updateSubsonicPlaylist(user, {
+        ? await updateSubsonicPlaylist(user, {
             playlistId,
             name: name || undefined,
             comment: Object.hasOwn(requestParameters(req), "comment")
@@ -404,7 +404,7 @@ async function handleSubsonicRequest(req, res) {
               : undefined,
             songIdsToAdd: getParameters(req, ["songId"]),
           })
-        : createSubsonicPlaylist(user, {
+        : await createSubsonicPlaylist(user, {
             name,
             songIds: getParameters(req, ["songId"]),
           });
@@ -459,7 +459,7 @@ async function handleSubsonicRequest(req, res) {
       .map((value) => Number.parseInt(value, 10))
       .filter((value) => Number.isInteger(value) && value >= 0);
     try {
-      const playlist = updateSubsonicPlaylist(user, {
+      const playlist = await updateSubsonicPlaylist(user, {
         playlistId,
         name: Object.hasOwn(requestParameters(req), "name") ? getParameter(req, "name") : undefined,
         comment: Object.hasOwn(requestParameters(req), "comment")
@@ -481,9 +481,13 @@ async function handleSubsonicRequest(req, res) {
   if (method === "deleteplaylist") {
     const playlistId = getParameter(req, "id");
     if (!playlistId) return sendError(res, format, 10, "Required parameter is missing: id");
-    return deleteSubsonicPlaylist(user, playlistId)
-      ? sendResponse(res, format)
-      : sendError(res, format, 70, "Requested data was not found");
+    try {
+      return await deleteSubsonicPlaylist(user, playlistId)
+        ? sendResponse(res, format)
+        : sendError(res, format, 70, "Requested data was not found");
+    } catch {
+      return sendError(res, format, 0, "Failed to delete playlist");
+    }
   }
   if (method === "stream" || method === "download") {
     const filePath = resolveStreamPath(getParameter(req, "id"), user);

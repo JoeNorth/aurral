@@ -30,6 +30,9 @@ import {
   getDownloadSourceNotConfiguredMessage,
   isAnyDownloadSourceConfigured,
 } from "../downloadSourceService.js";
+import {
+  isPipelinePayloadActive,
+} from "./weeklyFlowDownloadCancellation.js";
 
 const DEFAULT_CONCURRENCY = 3;
 const MIN_CONCURRENCY = 1;
@@ -789,6 +792,15 @@ export class WeeklyFlowWorker {
     };
 
     this._assertJobCanContinue(job, runGeneration);
+    if (
+      !isPipelinePayloadActive({
+        jobId: job.id,
+        playlistId: job.playlistId || job.playlistType,
+        playlistGeneration: job.playlistGeneration,
+      })
+    ) {
+      return;
+    }
 
     try {
       let phaseStart = process.hrtime.bigint();
@@ -837,6 +849,15 @@ export class WeeklyFlowWorker {
       }
       if (!isAnyDownloadSourceConfigured()) {
         throw new Error(getDownloadSourceNotConfiguredMessage());
+      }
+      if (
+        !isPipelinePayloadActive({
+          jobId: job.id,
+          playlistId: job.playlistId || job.playlistType,
+          playlistGeneration: job.playlistGeneration,
+        })
+      ) {
+        return;
       }
       this._assertJobCanContinue(job, runGeneration);
       if (!downloadTracker.enqueueDownloadPipeline(job.id)) {

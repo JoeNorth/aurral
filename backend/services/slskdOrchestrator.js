@@ -48,6 +48,12 @@ import {
   blockPipelineJobForReview,
   finalizePipelineJobSuccess,
 } from "./pipelineHelpers.js";
+import {
+  clearDownloadProviderWork,
+  isPipelinePayloadActive,
+  registerDownloadProviderWork,
+  withPipelineCommitLock,
+} from "./weeklyFlow/weeklyFlowDownloadCancellation.js";
 import { deferForInactiveOwner } from "./weeklyFlow/weeklyFlowOwnerStatus.js";
 
 import { getQualityProfile } from "./qualityProfileService.js";
@@ -410,6 +416,7 @@ async function failOrTryNextSource(payload, job, message, logDetails = {}) {
 export async function failPipelineJob(payload, message) {
   const jobId = payload?.jobId;
   if (!jobId) return;
+  if (!isPipelinePayloadActive(payload)) return;
   const job = downloadTracker.getJob(jobId);
   if (!job) return;
   if (job.status === "downloading" || job.status === "pending") {
@@ -611,6 +618,13 @@ async function cleanupTransferForPayload(payload, transfer) {
     .deleteTransfer(username, transferId, { remove: true })
     .catch((err) => { logger.warn("slskd", "Failed to clean up transfer for payload", { transferId, error: err?.message || String(err) }); });}
 
+function clearTrackedSearches(searchIds = []) {
+  const ids = Array.isArray(searchIds) ? searchIds : [];
+  for (const searchId of new Set(ids.map((entry) => String(entry || "").trim()).filter(Boolean))) {
+    clearDownloadProviderWork({ provider: "slskd-search", workId: searchId });
+  }
+}
+
 async function cleanupSuccessfulRunArtifacts(payload, transfer) {
   if (!slskdClient.isCleanupAfterRunsEnabled()) return;
   const searchIds = getPayloadSearchIds(payload);
@@ -629,13 +643,16 @@ async function cleanupSuccessfulRunArtifacts(payload, transfer) {
         ]
       : [];
   if (searchIds.length === 0 && transfers.length === 0) return;
-  await slskdClient.cleanupAfterRun({ searchIds, transfers }).catch((error) =>
+  try {
+    const result = await slskdClient.cleanupAfterRun({ searchIds, transfers });
+    clearTrackedSearches(result?.cleanedSearchIds);
+  } catch (error) {
     logger.warn("slskd", "Failed to clean up successful slskd run", {
       error: error?.message || String(error),
       searchIds,
       transferCount: transfers.length,
-    }),
-  );
+    });
+  }
 }
 
 async function cleanupEmptyAncestors(dir, rootBoundary) {
@@ -710,15 +727,33 @@ async function runSearchQuery(
   searchOptions,
   aggregated,
   seen,
+  isCancelled = () => false,
+  workContext = {},
 ) {
   const created = await slskdClient.createSearch(query);
+  registerDownloadProviderWork({
+    jobId: workContext.jobId,
+    playlistId: workContext.playlistId,
+    provider: "slskd-search",
+    workId: created.id,
+  });
+  const deleteTrackedSearch = async () => {
+    const deleted = await slskdClient.deleteSearch(created.id).catch(() => false);
+    if (deleted) clearDownloadProviderWork({ provider: "slskd-search", workId: created.id });
+    return deleted;
+  };
   if (Array.isArray(searchIds)) {
     searchIds.push(created.id);
   }
   if (!searchIdRef.value) {
     searchIdRef.value = created.id;
   }
+  if (isCancelled()) {
+    await deleteTrackedSearch();
+    return [];
+  }
   const completed = await slskdClient.waitForSearch(created.id, undefined, {
+    shouldCancel: isCancelled,
     earlyExitWhen: (data) =>
       hasSlskdSearchCandidates(
         probeAggregatedResults(aggregated, slskdClient.flattenSearchResults(data), seen),
@@ -726,13 +761,22 @@ async function runSearchQuery(
         searchOptions,
       ),
   });
+  if (isCancelled()) {
+    await deleteTrackedSearch();
+    return [];
+  }
   const results = slskdClient.flattenSearchResults(completed);
   const shouldCancel = hasSlskdSearchCandidates(
     probeAggregatedResults(aggregated, results, seen),
     resolvedTrack,
     searchOptions,
   );
-  await slskdClient.settleSearch(created.id, { cancel: shouldCancel });
+  if (shouldCancel) {
+    await deleteTrackedSearch();
+  } else {
+    await slskdClient.settleSearch(created.id);
+    clearDownloadProviderWork({ provider: "slskd-search", workId: created.id });
+  }
   return results;
 }
 
@@ -780,8 +824,11 @@ async function handleSearch(payload) {
         searchOptions,
         aggregated,
         seen,
+        () => !isPipelinePayloadActive(payload),
+        { jobId: payload.jobId, playlistId: payload.playlistId },
       );
       mergeSearchResults(aggregated, seen, results, (result) => `${result.user}\0${result.file}`);
+      if (!isPipelinePayloadActive(payload)) return null;
       if (hasSlskdSearchCandidates(aggregated, resolvedTrack, searchOptions)) {
         break;
       }
@@ -876,9 +923,13 @@ async function handleSearch(payload) {
       eligibleCount: ordered.length,
     });
     if (searchIds.length > 0) {
-      await slskdClient
-        .cleanupAfterRun({ searchIds, transfers: [] })
-        .catch((err) => { logger.warn("slskd", "Failed to clean up slskd run after empty search", { error: err?.message || String(err) }); });    }
+      try {
+        const result = await slskdClient.cleanupAfterRun({ searchIds, transfers: [] });
+        clearTrackedSearches(result?.cleanedSearchIds);
+      } catch (err) {
+        logger.warn("slskd", "Failed to clean up slskd run after empty search", { error: err?.message || String(err) });
+      }
+    }
     return failOrTryNextSource(payload, job, "No suitable slskd search results", {
       queryCount: queries.length,
       rawResultCount: aggregated.length,
@@ -919,20 +970,35 @@ async function handleDownload(payload) {
     remoteUsername: candidate.raw.user,
     remoteFilename: candidate.raw.file,
   });
-  let result;
+  let submission;
   try {
-    result = await slskdClient.enqueueBatch({
-      username: candidate.raw.user,
-      files: [
-        {
-          filename: candidate.raw.file,
-          size: Number(candidate.raw.size || 0),
+    submission = await withPipelineCommitLock(payload, async () => {
+      const result = await slskdClient.enqueueBatch({
+        username: candidate.raw.user,
+        files: [
+          {
+            filename: candidate.raw.file,
+            size: Number(candidate.raw.size || 0),
+          },
+        ],
+        options: {
+          externalId: job.id,
+          searchId,
         },
-      ],
-      options: {
-        externalId: job.id,
-        searchId,
-      },
+      });
+      const transfer = result?.legacyTransfer || result?.transfers?.[0] || result;
+      const transferId = readTransferId(transfer);
+      const transferUsername = String(result?.username || transfer?.username || candidate.raw.user).trim();
+      if (transferId) {
+        downloadTracker.updateDownloadMetadata(job.id, {
+          downloadClient: "slskd",
+          downloadClientId: transferId,
+          remoteUsername: transferUsername,
+        });
+      }
+      updateSlskdMetaStmt.run(null, result.batchId || null, null, null, job.id);
+      job.slskdBatchId = result.batchId || null;
+      return result;
     });
   } catch (error) {
     const message = error?.message || String(error);
@@ -955,8 +1021,8 @@ async function handleDownload(payload) {
     }
     return failOrTryNextSource(payload, job, message);
   }
-  updateSlskdMetaStmt.run(null, result.batchId || null, null, null, job.id);
-  job.slskdBatchId = result.batchId || null;
+  if (submission.cancelled || !isPipelinePayloadActive(payload)) return null;
+  const result = submission.result;
   const eventOffset =
     payload.eventOffset != null ? payload.eventOffset : await readCurrentEventOffset();
   return {
@@ -1107,6 +1173,16 @@ async function handleFinalize(payload) {
       strict: candidate?.evaluation?.decision !== "accept",
     },
   });
+  if (!isPipelinePayloadActive(payload)) {
+    await cleanupRejectedDownload({
+      sourcePath,
+      slskdRoot,
+      playlistRoot,
+      transfer,
+      username: candidate?.raw?.user,
+    });
+    return null;
+  }
   if (!validation.valid) {
     logger.warn("slskd", "slskd download validation failed", {
       jobId: job.id,
@@ -1158,36 +1234,51 @@ async function handleFinalize(payload) {
   }
   const inactiveOwner = deferForInactiveOwner(payload, job);
   if (inactiveOwner) return inactiveOwner;
-  await writeAudioMetadata(sourcePath, resolvedTrack);
-  import("./aurralHistoryService.js")
-    .then(({ recordTrackJobMoving }) => recordTrackJobMoving(job))
-    .catch((err) => { logger.warn("slskd", "Failed to record track job moving", { jobId: job.id, error: err?.message || String(err) }); });
-  const committedFinalPath = await commitImportToPlaylistLibrary(
-    sourcePath,
-    finalPath,
-  );  if (slskdRoot) {
-    await cleanupEmptyAncestors(path.dirname(sourcePath), slskdRoot).catch(() => {});
+  const committed = await withPipelineCommitLock(payload, async () => {
+    await writeAudioMetadata(sourcePath, resolvedTrack);
+    import("./aurralHistoryService.js")
+      .then(({ recordTrackJobMoving }) => recordTrackJobMoving(job))
+      .catch((err) => { logger.warn("slskd", "Failed to record track job moving", { jobId: job.id, error: err?.message || String(err) }); });
+    const committedFinalPath = await commitImportToPlaylistLibrary(
+      sourcePath,
+      finalPath,
+    );
+    if (slskdRoot) {
+      await cleanupEmptyAncestors(path.dirname(sourcePath), slskdRoot).catch(() => {});
+    }
+    recordPayloadOutcome(job, payload, "success", null, {
+      transfer,
+      sourcePath,
+      finalPath: committedFinalPath,
+      validation,
+    });
+    return finalizePipelineJobSuccess({
+      downloadTracker,
+      job,
+      committedFinalPath,
+      album: candidate?.resolvedAlbumName || job.albumName,
+      quality: validation.quality,
+      onSuccess: () => cleanupSuccessfulRunArtifacts(payload, transfer),
+    });
+  });
+  if (committed.cancelled) {
+    await cleanupRejectedDownload({
+      sourcePath,
+      slskdRoot,
+      playlistRoot,
+      transfer,
+      username: candidate?.raw?.user,
+    });
+    return null;
   }
-  recordPayloadOutcome(job, payload, "success", null, {
-    transfer,
-    sourcePath,
-    finalPath: committedFinalPath,
-    validation,
-  });
-  return finalizePipelineJobSuccess({
-    downloadTracker,
-    job,
-    committedFinalPath,
-    album: candidate?.resolvedAlbumName || job.albumName,
-    quality: validation.quality,
-    onSuccess: () => cleanupSuccessfulRunArtifacts(payload, transfer),
-  });
+  return committed.result;
 }
 
 export async function processPipelinePayload(payload) {
   if (!payload || !payload.phase || !payload.jobId) {
     throw new Error("Invalid pipeline payload");
   }
+  if (!isPipelinePayloadActive(payload)) return null;
   const currentJob = downloadTracker.getJob(payload.jobId);
   const inactiveOwner = deferForInactiveOwner(payload, currentJob);
   if (inactiveOwner) return inactiveOwner;
@@ -1254,6 +1345,7 @@ export async function processPipelinePayload(payload) {
 
 export async function continuePipeline(payload) {
   if (!payload) return;
+  if (!isPipelinePayloadActive(payload)) return;
   if (payload.delaySeconds) {
     enqueuePipelineJob(payload, {
       delaySeconds: Number(payload.delaySeconds),

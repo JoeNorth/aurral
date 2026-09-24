@@ -29,6 +29,10 @@ import {
   blockPipelineJobForReview,
   finalizePipelineJobSuccess,
 } from "./pipelineHelpers.js";
+import {
+  isPipelinePayloadActive,
+  withPipelineCommitLock,
+} from "./weeklyFlow/weeklyFlowDownloadCancellation.js";
 
 const ytdlpClient = getDownloadClient("ytdlp");
 const LIVE_STATUSES = new Set(["is_live", "was_live", "post_live", "is_upcoming"]);
@@ -149,8 +153,15 @@ async function handleYtdlpDownload(payload, helpers) {
 
   let downloaded;
   try {
-    downloaded = await ytdlpClient.downloadAudio(url, { jobId: job.id });
+    downloaded = await ytdlpClient.downloadAudio(url, {
+      jobId: job.id,
+      shouldCancel: () => !isPipelinePayloadActive(payload),
+    });
   } catch (error) {
+    if (!isPipelinePayloadActive(payload)) {
+      await ytdlpClient.cleanupStaging(job.id);
+      return null;
+    }
     const message = error?.message || String(error);
     logger.warn("ytdlp", "yt-dlp download failed", {
       jobId: job.id,
@@ -161,6 +172,11 @@ async function handleYtdlpDownload(payload, helpers) {
       return buildNextCandidatePayload(payload, { downloadedPath: null });
     }
     return helpers.failOrTryNextSource(payload, job, message);
+  }
+
+  if (!isPipelinePayloadActive(payload)) {
+    await ytdlpClient.cleanupStaging(job.id);
+    return null;
   }
 
   downloadTracker.updateDownloadMetadata(job.id, {
@@ -208,6 +224,10 @@ async function handleYtdlpFinalize(payload, helpers) {
       strict: candidate?.evaluation?.decision !== "accept",
     },
   });
+  if (!isPipelinePayloadActive(payload)) {
+    await ytdlpClient.cleanupStaging(job.id);
+    return null;
+  }
   if (!validation.valid) {
     if (
       validation.blocked &&
@@ -231,27 +251,34 @@ async function handleYtdlpFinalize(payload, helpers) {
 
   const inactiveOwner = deferForInactiveOwner(payload, job);
   if (inactiveOwner) return inactiveOwner;
-  await writeAudioMetadata(filePath, resolvedTrack);
-  import("./aurralHistoryService.js")
-    .then(({ recordTrackJobMoving }) => recordTrackJobMoving(job))
-    .catch((err) => {
-      console.warn(err);
-    });
   const playlistRoot = resolvePlaylistRoot();
   const destination = String(payload.destination || "").trim();
   const ext = path.extname(filePath).toLowerCase();
   const finalDir = joinUnderRoot(playlistRoot, destination);
   const finalName = `${sanitizePathPart(job.trackName, "Unknown Track")}${ext || ".m4a"}`;
   const finalPath = path.join(finalDir, finalName);
-  const committedFinalPath = await commitImportToPlaylistLibrary(filePath, finalPath);
-  await ytdlpClient.cleanupStaging(job.id);
-  return finalizePipelineJobSuccess({
-    downloadTracker,
-    job,
-    committedFinalPath,
-    album: candidate?.resolvedAlbumName || job.albumName,
-    quality: validation.quality,
+  const committed = await withPipelineCommitLock(payload, async () => {
+    await writeAudioMetadata(filePath, resolvedTrack);
+    import("./aurralHistoryService.js")
+      .then(({ recordTrackJobMoving }) => recordTrackJobMoving(job))
+      .catch((err) => {
+        console.warn(err);
+      });
+    const committedFinalPath = await commitImportToPlaylistLibrary(filePath, finalPath);
+    await ytdlpClient.cleanupStaging(job.id);
+    return finalizePipelineJobSuccess({
+      downloadTracker,
+      job,
+      committedFinalPath,
+      album: candidate?.resolvedAlbumName || job.albumName,
+      quality: validation.quality,
+    });
   });
+  if (committed.cancelled) {
+    await ytdlpClient.cleanupStaging(job.id);
+    return null;
+  }
+  return committed.result;
 }
 
 export async function processYtdlpPipelinePayload(payload, helpers = {}) {
@@ -260,6 +287,10 @@ export async function processYtdlpPipelinePayload(payload, helpers = {}) {
     jobId: payload.jobId,
     source: payload.source,
   });
+  if (!isPipelinePayloadActive(payload)) {
+    await ytdlpClient.cleanupStaging(payload.jobId);
+    return null;
+  }
   switch (payload.phase) {
     case "search":
       return handleYtdlpSearch(payload, helpers);

@@ -7,6 +7,7 @@ import express from "express";
 import {
   setupIsolatedBackend,
   cleanupIsolatedState,
+  createMockHttpServer,
   resetDatabase,
 } from "../helpers/backendTestHarness.js";
 
@@ -15,24 +16,39 @@ const [
   { db },
   { dbOps },
   { downloadTracker },
+  cancellationModule,
   { flowPlaylistConfig },
   { playlistManager },
   { weeklyFlowWorker },
   { queueQualityUpgrade },
   { registerJobs },
   libraryStore,
+  playlistDownloadUtils,
 ] = await setupIsolatedBackend(
   "approved-import-path",
   "backend/config/db-sqlite.js",
   "backend/db/helpers/index.js",
   "backend/services/weeklyFlow/weeklyFlowDownloadTracker.js",
+  "backend/services/weeklyFlow/weeklyFlowDownloadCancellation.js",
   "backend/services/weeklyFlow/weeklyFlowPlaylistConfig.js",
   "backend/services/weeklyFlow/weeklyFlowPlaylistManager.js",
   "backend/services/weeklyFlow/weeklyFlowWorker.js",
   "backend/services/qualityProfileService.js",
   "backend/routes/weeklyFlow/handlers/jobs.js",
   "backend/services/libraryMediaStore.js",
+  "backend/services/playlistDownloadUtils.js",
 );
+
+const {
+  activatePlaylistDownloadGeneration,
+  cancelPlaylistDownloadGeneration,
+  getPlaylistDownloadGeneration,
+  isPipelinePayloadActive,
+  withPipelineCommitLock,
+  clearDownloadProviderWork,
+  listDownloadProviderWork,
+  registerDownloadProviderWork,
+} = cancellationModule;
 
 const app = express();
 app.use(express.json());
@@ -175,6 +191,176 @@ test("approving a reviewed download commits it inside the managed playlist libra
   assert.equal(downloadTracker.getJob(jobId)?.finalPath, expectedPath);
   assert.equal(await fs.readFile(expectedPath, "utf8"), "reviewed audio");
   await assert.rejects(fs.access(path.join(playlistManager.libraryRoot, "Reviewed.m3u")));
+});
+
+test("approval cannot commit an orphaned job into a recreated playlist", async () => {
+  const playlistId = "reviewed-stale-generation";
+  flowPlaylistConfig.createSharedPlaylist({
+    id: playlistId,
+    name: "Reviewed stale generation",
+    tracks: [],
+  });
+  activatePlaylistDownloadGeneration(playlistId);
+  cancelPlaylistDownloadGeneration(playlistId);
+  const cancelledGeneration = getPlaylistDownloadGeneration(playlistId);
+
+  const sourcePath = path.join(isolatedState.baseDir, "review", "Stale Track.flac");
+  await fs.mkdir(path.dirname(sourcePath), { recursive: true });
+  await fs.writeFile(sourcePath, "reviewed audio");
+  const jobId = downloadTracker.addJob(
+    { artistName: "Artist", trackName: "Stale Track", albumName: "Album" },
+    playlistId,
+  );
+  downloadTracker.setBlocked(jobId, "blocked-duration-mismatch", sourcePath);
+
+  assert.equal(
+    activatePlaylistDownloadGeneration(playlistId),
+    cancelledGeneration + 1,
+  );
+
+  const response = await fetch(`${baseUrl}/jobs/${jobId}/approve`, { method: "POST" });
+  const payload = await response.json();
+  const expectedPath = path.join(
+    process.env.DOWNLOAD_FOLDER,
+    "Artist",
+    "Album",
+    "Stale Track.flac",
+  );
+
+  assert.equal(response.status, 409, JSON.stringify(payload));
+  assert.equal(downloadTracker.getJob(jobId)?.status, "blocked");
+  assert.equal(await fs.readFile(sourcePath, "utf8"), "reviewed audio");
+  await assert.rejects(fs.access(expectedPath));
+});
+
+test("clearing all jobs waits for an in-flight playlist import to finish", async () => {
+  const playlistId = "clear-all-import-race";
+  const jobId = downloadTracker.addJob(
+    { artistName: "Artist", trackName: "Track", albumName: "Album" },
+    playlistId,
+  );
+  const payload = {
+    jobId,
+    playlistId,
+    playlistGeneration: downloadTracker.getJob(jobId).playlistGeneration,
+  };
+  const sourcePath = path.join(isolatedState.baseDir, "clear-all-race", "Track.flac");
+  const finalPath = path.join(process.env.DOWNLOAD_FOLDER, "clear-all-race", "Track.flac");
+  await fs.mkdir(path.dirname(sourcePath), { recursive: true });
+  await fs.writeFile(sourcePath, "downloaded audio");
+
+  let enterCommit;
+  let releaseCommit;
+  const commitEntered = new Promise((resolve) => {
+    enterCommit = resolve;
+  });
+  const commitGate = new Promise((resolve) => {
+    releaseCommit = resolve;
+  });
+  const commitPromise = withPipelineCommitLock(payload, async () => {
+    enterCommit();
+    await commitGate;
+    const committedPath = await playlistDownloadUtils.commitImportToPlaylistLibrary(
+      sourcePath,
+      finalPath,
+    );
+    assert.equal(downloadTracker.setDone(jobId, committedPath, "Album"), true);
+    return committedPath;
+  });
+  await commitEntered;
+
+  const clearPromise = fetch(`${baseUrl}/jobs/all`, { method: "DELETE" });
+  let concurrentJobId;
+  try {
+    const state = await Promise.race([
+      (async () => {
+        const deadline = Date.now() + 2000;
+        while (Date.now() < deadline) {
+          if (!isPipelinePayloadActive(payload)) return "cancelled";
+          if (!downloadTracker.getJob(jobId)) return "deleted";
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        return "timeout";
+      })(),
+      clearPromise.then(() => "responded"),
+    ]);
+
+    assert.equal(state, "cancelled");
+    assert.ok(downloadTracker.getJob(jobId));
+    concurrentJobId = downloadTracker.addJob(
+      { artistName: "Another Artist", trackName: "Another Track" },
+      "created-during-clear",
+    );
+  } finally {
+    releaseCommit();
+    await Promise.allSettled([commitPromise, clearPromise]);
+  }
+
+  const [commitResult, clearResponse] = await Promise.all([commitPromise, clearPromise]);
+  const clearPayload = await clearResponse.json();
+
+  assert.equal(commitResult.cancelled, false);
+  assert.equal(clearResponse.status, 200, JSON.stringify(clearPayload));
+  assert.equal(await fs.readFile(finalPath, "utf8"), "downloaded audio");
+  assert.equal(downloadTracker.getJob(jobId), null);
+  assert.ok(downloadTracker.getJob(concurrentJobId));
+  downloadTracker.removeJob(concurrentJobId);
+});
+
+test("failed clear-all leaves jobs stopped and visible so provider cleanup can be retried", async () => {
+  const playlistId = "clear-all-provider-failure";
+  const originalSettings = dbOps.getSettings();
+  let providerStatus = 503;
+  const mock = await createMockHttpServer((request, response) => {
+    request.resume();
+    response.writeHead(providerStatus);
+    response.end();
+  });
+  const jobId = downloadTracker.addJob(
+    { artistName: "Artist", trackName: "Provider failure song" },
+    playlistId,
+  );
+  registerDownloadProviderWork({
+    jobId,
+    playlistId,
+    provider: "slskd-search",
+    workId: "clear-all-retry-search",
+  });
+  dbOps.updateSettings({
+    ...originalSettings,
+    integrations: {
+      slskd: { enabled: true, url: mock.url, apiKey: "test-key" },
+    },
+  });
+
+  try {
+    const failedResponse = await fetch(`${baseUrl}/jobs/all`, { method: "DELETE" });
+    const failedPayload = await failedResponse.json();
+    const stoppedJob = downloadTracker.getJob(jobId);
+
+    assert.equal(failedResponse.status, 500);
+    assert.match(failedPayload.error, /stopped in Aurral and marked failed/i);
+    assert.equal(stoppedJob.status, "failed");
+    assert.match(stoppedJob.error, /provider cancellation pending/i);
+    assert.equal(
+      isPipelinePayloadActive({ jobId, playlistId, playlistGeneration: 0 }),
+      false,
+    );
+    assert.equal(listDownloadProviderWork({ jobIds: [jobId] }).length, 1);
+
+    providerStatus = 204;
+    const retryResponse = await fetch(`${baseUrl}/jobs/all`, { method: "DELETE" });
+    const retryPayload = await retryResponse.json();
+    assert.equal(retryResponse.status, 200, JSON.stringify(retryPayload));
+    assert.equal(retryPayload.cleared, 1);
+    assert.equal(downloadTracker.getJob(jobId), null);
+    assert.equal(listDownloadProviderWork({ jobIds: [jobId] }).length, 0);
+  } finally {
+    dbOps.updateSettings(originalSettings);
+    clearDownloadProviderWork({ provider: "slskd-search", workId: "clear-all-retry-search" });
+    downloadTracker.removeJob(jobId);
+    await mock.close();
+  }
 });
 
 test("approving a reviewed upgrade replaces the source playlist file", async (t) => {

@@ -314,6 +314,36 @@ test("SABnzbd client reads the completed download folder", async () => {
   );
 });
 
+test("SABnzbd client removes queued and historical jobs", async () => {
+  const calls = [];
+  const client = new SabnzbdClient();
+  client.api = async (mode, params) => {
+    calls.push({ mode, params });
+    return { status: true };
+  };
+
+  assert.equal(await client.deleteQueueItem("SABnzbd_nzo_queue"), true);
+  assert.equal(await client.deleteHistoryItem("SABnzbd_nzo_history"), true);
+  assert.deepEqual(calls, [
+    {
+      mode: "queue",
+      params: { name: "delete", value: "SABnzbd_nzo_queue", del_files: 1 },
+    },
+    {
+      mode: "history",
+      params: { name: "delete", value: "SABnzbd_nzo_history", del_files: 1 },
+    },
+  ]);
+});
+
+test("SABnzbd client does not claim a failed queue or history deletion succeeded", async () => {
+  const client = new SabnzbdClient();
+  client.api = async () => ({ status: false });
+
+  assert.equal(await client.deleteQueueItem("SABnzbd_nzo_queue"), false);
+  assert.equal(await client.deleteHistoryItem("SABnzbd_nzo_history"), false);
+});
+
 test("download source selection orders enabled sources by priority", () => {
   dbOps.updateSettings({
     integrations: {

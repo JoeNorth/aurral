@@ -433,6 +433,8 @@ export class SlskdClient {
   async waitForSearch(searchId, timeoutMs = DEFAULT_SEARCH_TIMEOUT_MS, options = {}) {
     const earlyExitWhen =
       typeof options.earlyExitWhen === "function" ? options.earlyExitWhen : null;
+    const shouldCancel =
+      typeof options.shouldCancel === "function" ? options.shouldCancel : null;
     const emptyTimeoutMs = Math.max(
       0,
       Number(options.emptyTimeoutMs ?? DEFAULT_EMPTY_SEARCH_TIMEOUT_MS),
@@ -450,8 +452,30 @@ export class SlskdClient {
     let graceUntil = 0;
     let totalFiles = 0;
     let hasSeenFiles = false;
+    const cancelSearch = async () => {
+      await this.deleteSearch(searchId).catch(() => {});
+      return null;
+    };
+
     while (true) {
-      const data = await this.getSearch(searchId);
+      if (shouldCancel?.()) {
+        return cancelSearch();
+      }
+
+      let data;
+      try {
+        data = await this.getSearch(searchId);
+      } catch (error) {
+        if (shouldCancel?.()) {
+          return cancelSearch();
+        }
+        throw error;
+      }
+
+      if (shouldCancel?.()) {
+        return cancelSearch();
+      }
+
       const flattenedCount = this.flattenSearchResults(data).length;
       const fileCount = Number(data?.fileCount || data?.FileCount || 0);
       totalFiles = Math.max(totalFiles, fileCount, flattenedCount);
@@ -678,6 +702,7 @@ export class SlskdClient {
     return withHonkerLock("slskd-api", async () => {
       let searchesRemoved = 0;
       let transfersRemoved = 0;
+      const cleanedSearchIds = [];
       const ownedOnly = options.ownedOnly !== false;
       const explicitSearchIds = Array.isArray(options.searchIds) ? options.searchIds : [];
       const explicitTransfers = Array.isArray(options.transfers) ? options.transfers : [];
@@ -711,6 +736,7 @@ export class SlskdClient {
       for (const searchId of [...new Set(searchIds)]) {
         if (await this.deleteSearch(searchId)) {
           searchesRemoved += 1;
+          cleanedSearchIds.push(searchId);
         }
       }
 
@@ -736,7 +762,12 @@ export class SlskdClient {
         transfersRemoved,
         downloadsRemoved,
       });
-      return { searchesRemoved, transfersRemoved, downloadsRemoved };
+      return {
+        searchesRemoved,
+        transfersRemoved,
+        downloadsRemoved,
+        cleanedSearchIds,
+      };
     });
   }
 }

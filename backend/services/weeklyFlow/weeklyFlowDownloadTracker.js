@@ -14,6 +14,12 @@ import {
 } from "../playlistPaths.js";
 import { flowPlaylistConfig } from "./weeklyFlowPlaylistConfig.js";
 import { logger } from "../logger.js";
+import {
+  cancelDownloadJob,
+  cancelDownloadJobs,
+  getPlaylistDownloadGeneration,
+  isPipelinePayloadActive,
+} from "./weeklyFlowDownloadCancellation.js";
 
 const parseDeniedSources = (raw) => {
   if (!raw) return [];
@@ -33,6 +39,11 @@ const persistedRevisionStmt = db.prepare(
 const liveJobStmt = db.prepare(`SELECT * FROM ${JOBS_TABLE} WHERE id = ?`);
 const livePlaylistJobsStmt = db.prepare(
   `SELECT * FROM ${JOBS_TABLE} WHERE playlist_type = ? ORDER BY created_at, id`,
+);
+const livePlaylistIdJobsStmt = db.prepare(
+  `SELECT * FROM ${JOBS_TABLE}
+   WHERE playlist_id = ? OR playlist_type = ?
+   ORDER BY created_at, id`,
 );
 const livePlaylistJobsLimitedStmt = db.prepare(
   `SELECT * FROM ${JOBS_TABLE} WHERE playlist_type = ? ORDER BY created_at, id LIMIT ?`,
@@ -80,6 +91,7 @@ function rowToJob(row) {
     albumTrackTitles: parseStringListJson(row.album_track_titles),
     artistAliases: parseStringListJson(row.artist_aliases),
     playlistId: row.playlist_id || row.playlist_type,
+    playlistGeneration: Number(row.playlist_generation ?? 0),
     playlistType: row.playlist_type || row.playlist_id,
     managedBy: row.managed_by === "lidarr" ? "lidarr" : "aurral",
     requestGroupId: row.request_group_id || null,
@@ -132,6 +144,7 @@ const insertStmt = db.prepare(`
     album_track_titles,
     artist_aliases,
     playlist_id,
+    playlist_generation,
     playlist_type,
     managed_by,
     request_group_id,
@@ -152,7 +165,7 @@ const insertStmt = db.prepare(`
     quality_upgrade_checked_at,
     upgrade_for_job_id
   )
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 const updateStmt = db.prepare(`
@@ -191,9 +204,6 @@ const deleteAllStmt = db.prepare(`DELETE FROM ${JOBS_TABLE}`);
 const selectAllStmt = db.prepare(`SELECT * FROM ${JOBS_TABLE} ORDER BY created_at ASC, id ASC`);
 const updatePlaylistTypeStmt = db.prepare(
   `UPDATE ${JOBS_TABLE} SET playlist_type = ?, playlist_id = ? WHERE playlist_type = ?`,
-);
-const updatePlaylistIdStmt = db.prepare(
-  `UPDATE ${JOBS_TABLE} SET playlist_id = ? WHERE id = ?`,
 );
 const clearSlskdMetaStmt = db.prepare(`
   UPDATE ${JOBS_TABLE}
@@ -255,6 +265,7 @@ function buildPipelinePayload(job) {
     phase: "search",
     jobId: job.id,
     playlistId,
+    playlistGeneration: job.playlistGeneration,
     track: {
       artistName: job.artistName,
       trackName: job.trackName,
@@ -408,7 +419,9 @@ export class WeeklyFlowDownloadTracker {
     const job = this.jobs.get(jobId);
     if (!job || job.status !== "pending") return false;
     if (this.isSlskdDispatched(jobId)) return false;
-    enqueuePipelineJob(buildPipelinePayload(job));
+    const payload = buildPipelinePayload(job);
+    if (!isPipelinePayloadActive(payload)) return false;
+    enqueuePipelineJob(payload);
     this.markSlskdDispatched(jobId);
     return true;
   }
@@ -567,6 +580,7 @@ export class WeeklyFlowDownloadTracker {
       stringifyStringListJson(job.albumTrackTitles),
       stringifyStringListJson(job.artistAliases),
       job.playlistId || job.playlistType,
+      job.playlistGeneration ?? 0,
       job.playlistType || job.playlistId,
       job.managedBy === "lidarr" ? "lidarr" : "aurral",
       job.requestGroupId ?? null,
@@ -623,13 +637,14 @@ export class WeeklyFlowDownloadTracker {
     this._touchRevision();
   }
 
-  addJob(track, playlistType) {
+  addJob(track, playlistType, options = {}) {
     const id = randomUUID();
     const artistName = String(track?.artistName || "").trim();
     const trackName = String(track?.trackName || "").trim();
     if (!artistName || !trackName) {
       return null;
     }
+    const playlistId = options?.playlistId || playlistType;
     const job = {
       id,
       artistName,
@@ -648,7 +663,10 @@ export class WeeklyFlowDownloadTracker {
       albumTrackCount: normalizePositiveInteger(track?.albumTrackCount),
       albumTrackTitles: normalizeStringList(track?.albumTrackTitles),
       artistAliases: normalizeStringList(track?.artistAliases),
-      playlistId: playlistType,
+      playlistId,
+      playlistGeneration: Number.isInteger(options?.playlistGeneration)
+        ? options.playlistGeneration
+        : getPlaylistDownloadGeneration(playlistId),
       playlistType,
       managedBy: track?.managedBy === "lidarr" ? "lidarr" : "aurral",
       requestGroupId: track?.requestGroupId
@@ -699,11 +717,13 @@ export class WeeklyFlowDownloadTracker {
   addUpgradeJob(sourceJob) {
     if (!sourceJob?.id || sourceJob.status !== "done" || !sourceJob.finalPath) return null;
     if (this.findActiveUpgradeJob(sourceJob)) return null;
-    const id = this.addJob(sourceJob, "quality-upgrade");
+    const playlistId = sourceJob.playlistId || sourceJob.playlistType;
+    const id = this.addJob(sourceJob, "quality-upgrade", {
+      playlistId,
+      playlistGeneration: sourceJob.playlistGeneration,
+    });
     const job = this.jobs.get(id);
-    job.playlistId = sourceJob.playlistId || sourceJob.playlistType;
     job.upgradeForJobId = sourceJob.id;
-    updatePlaylistIdStmt.run(job.playlistId, id);
     this.pendingSet.delete(id);
     this.pendingRetrySet.delete(id);
     this._removeFromPendingQueues(id);
@@ -837,6 +857,7 @@ export class WeeklyFlowDownloadTracker {
   removeJob(id) {
     const job = this.jobs.get(id);
     if (!job) return false;
+    cancelDownloadJob(id);
     this.clearSlskdPipelineState(id);
     this.jobs.delete(id);
     this.pendingSet.delete(id);
@@ -894,7 +915,15 @@ export class WeeklyFlowDownloadTracker {
   getNextPendingMatching(predicate = null, lastPlaylistType = null) {
     const accepts = typeof predicate === "function" ? predicate : () => true;
     const canProcess = (job) =>
-      job && job.status === "pending" && !this._shouldSkipForWorker(job) && accepts(job);
+      job &&
+      job.status === "pending" &&
+      !this._shouldSkipForWorker(job) &&
+      isPipelinePayloadActive({
+        jobId: job.id,
+        playlistId: job.playlistId || job.playlistType,
+        playlistGeneration: job.playlistGeneration,
+      }) &&
+      accepts(job);
     this.pendingFreshQueue = this._compactPendingQueue(this.pendingFreshQueue);
     const nextFresh = this._pickPendingFromQueue(this.pendingFreshQueue, lastPlaylistType);
     if (canProcess(nextFresh)) return nextFresh;
@@ -1094,6 +1123,16 @@ export class WeeklyFlowDownloadTracker {
     return sortByCreatedAt(jobs);
   }
 
+  getByPlaylistId(playlistId) {
+    const safePlaylistId = String(playlistId || "").trim();
+    if (!safePlaylistId) return [];
+    return sortByCreatedAt(
+      [...this.jobs.values()].filter(
+        (job) => job.playlistId === safePlaylistId || job.playlistType === safePlaylistId,
+      ),
+    );
+  }
+
   getByStatus(status) {
     const jobs = [];
     for (const job of this.jobs.values()) {
@@ -1248,6 +1287,7 @@ export class WeeklyFlowDownloadTracker {
         toDelete.push(id);
       }
     }
+    cancelDownloadJobs(toDelete);
     for (const id of toDelete) {
       this.jobs.delete(id);
       if (cleanPending) {
@@ -1270,6 +1310,14 @@ export class WeeklyFlowDownloadTracker {
 
   clearByPlaylistType(playlistType) {
     return this._deleteJobsWhere((job) => job.playlistType === playlistType);
+  }
+
+  clearByPlaylistId(playlistId) {
+    const safePlaylistId = String(playlistId || "").trim();
+    if (!safePlaylistId) return 0;
+    return this._deleteJobsWhere(
+      (job) => job.playlistId === safePlaylistId || job.playlistType === safePlaylistId,
+    );
   }
 
   clearPendingByPlaylistType(playlistType) {
@@ -1317,6 +1365,9 @@ function readTrackerFromDatabase(name, args) {
       : livePlaylistJobsStmt.all(first ?? null);
     return liveJobs(rows);
   }
+  if (name === "getByPlaylistId") {
+    return liveJobs(livePlaylistIdJobsStmt.all(first ?? null, first ?? null));
+  }
   if (name === "getByStatus") return liveJobs(liveStatusJobsStmt.all(first ?? null));
   if (name === "getDoneWithFinalPath") {
     const limit = Number.isFinite(Number(first)) && Number(first) > 0 ? Math.floor(Number(first)) : 500;
@@ -1356,7 +1407,7 @@ function readTrackerFromDatabase(name, args) {
 }
 
 const LIVE_READ_METHODS = new Set([
-  "getJob", "getAll", "getByPlaylistType", "getByStatus", "getDoneWithFinalPath",
+  "getJob", "getAll", "getByPlaylistType", "getByPlaylistId", "getByStatus", "getDoneWithFinalPath",
   "getNextPending", "peekPending", "hasActiveJobsForPlaylist", "getRevision",
   "getStats", "getStatsByPlaylistType", "getPlaylistTypeStats",
 ]);

@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import { dbOps } from "../../db/helpers/index.js";
+import { dbOps, userOps } from "../../db/helpers/index.js";
 import {
   recordFlowGenerationStarted,
   recordFlowTracksGenerated,
@@ -74,6 +74,12 @@ function normalizeTrackList(value) {
 const filterBlockedPlaylistTracks = (ownerUserId, tracks) => {
   if (ownerUserId == null) return tracks;
   return filterBlockedArtistsForUser(String(ownerUserId), tracks);
+};
+
+const isOwnerActive = (ownerUserId) => {
+  if (ownerUserId == null) return true;
+  const owner = userOps.getUserById(Number(ownerUserId));
+  return owner?.status === "active";
 };
 
 const removePlaylistLocalTrackFile = async (job, playlistId, { protectPlayback = true } = {}) => {
@@ -242,6 +248,7 @@ async function runFlowSeed({
   const flow = flowPlaylistConfig.getFlow(safeFlowId);
   if (!flow) return { missing: true };
   if (requireEnabled && flow.enabled !== true) return { skipped: true };
+  if (!isOwnerActive(flow.ownerUserId)) return { skipped: true, inactiveOwner: true };
   const unavailableError = getUnavailableFlowSourceError(flow.mix);
   if (unavailableError) throw new Error(unavailableError);
 
@@ -261,6 +268,9 @@ async function runFlowSeed({
     const latestFlow = flowPlaylistConfig.getFlow(safeFlowId);
     if (!latestFlow) return { missing: true };
     if (requireEnabled && latestFlow.enabled !== true) return { skipped: true };
+    if (!isOwnerActive(latestFlow.ownerUserId)) {
+      return { skipped: true, inactiveOwner: true };
+    }
     if (JSON.stringify(latestFlow) !== flowSnapshot) {
       throw new Error("Flow settings changed while planning; retrying");
     }
@@ -298,6 +308,9 @@ async function runFlowSeed({
       const current = flowPlaylistConfig.getFlow(safeFlowId);
       if (!current) return { missing: true };
       if (requireEnabled && current.enabled !== true) return { skipped: true };
+      if (!isOwnerActive(current.ownerUserId)) {
+        return { skipped: true, inactiveOwner: true };
+      }
       if (JSON.stringify(current) !== flowSnapshot) {
         throw new Error("Flow settings changed while planning; retrying");
       }
@@ -380,10 +393,17 @@ async function adoptFlowSeed({ flowId, tracks = [] } = {}) {
   const safeFlowId = String(flowId || "").trim();
   const flow = flowPlaylistConfig.getFlow(safeFlowId);
   if (!flow) return { missing: true };
+  if (!isOwnerActive(flow.ownerUserId)) return { skipped: true, inactiveOwner: true };
   const normalizedTracks = normalizeTrackList(tracks);
-  const result = await withPlaylistMutation(safeFlowId, async () =>
-    weeklyFlowWorker.seedFlowRunWithTracks(safeFlowId, flow, normalizedTracks),
-  );
+  const result = await withPlaylistMutation(safeFlowId, async () => {
+    const latestFlow = flowPlaylistConfig.getFlow(safeFlowId);
+    if (!latestFlow) return { missing: true };
+    if (!isOwnerActive(latestFlow.ownerUserId)) {
+      return { skipped: true, inactiveOwner: true };
+    }
+    return weeklyFlowWorker.seedFlowRunWithTracks(safeFlowId, latestFlow, normalizedTracks);
+  });
+  if (result?.skipped || result?.missing) return result;
   await wakeDownloadWorker();
   recordFlowTracksGenerated({
     flowId: safeFlowId,

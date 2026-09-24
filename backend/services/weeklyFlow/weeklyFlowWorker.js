@@ -20,6 +20,7 @@ import {
 } from "../playlistPaths.js";
 import { startSlskdOrchestratorWorker } from "../slskdOrchestratorWorker.js";
 import { withHonkerLock } from "../honkerDb.js";
+import { isPlaylistOwnerActive } from "./weeklyFlowOwnerStatus.js";
 import {
   getFlowOwnerStatus,
   isFlowOwnerProcess,
@@ -111,6 +112,9 @@ export class WeeklyFlowWorker {
     }
     if (this._isPlaylistBlocked(job?.playlistType)) {
       throw this._createControlFlowError(PLAYLIST_MUTATION_CODE, "Playlist mutation in progress");
+    }
+    if (!isPlaylistOwnerActive(job?.playlistId || job?.playlistType)) {
+      throw this._createControlFlowError(PLAYLIST_MUTATION_CODE, "Playlist owner is inactive");
     }
   }
 
@@ -265,7 +269,9 @@ export class WeeklyFlowWorker {
 
   _getNextReadyPendingJob(lastPlaylistType = null) {
     return downloadTracker.getNextPendingMatching(
-      (job) => !this.activeJobs.has(job.id),
+      (job) =>
+        !this.activeJobs.has(job.id) &&
+        isPlaylistOwnerActive(job?.playlistId || job?.playlistType),
       lastPlaylistType,
     );
   }
@@ -787,6 +793,7 @@ export class WeeklyFlowWorker {
     try {
       let phaseStart = process.hrtime.bigint();
       const resolvedTrack = await resolveWeeklyFlowTrackContext(job);
+      this._assertJobCanContinue(job, runGeneration);
       downloadTracker.updateMetadata(job.id, resolvedTrack);
       Object.assign(job, resolvedTrack);
       const { existingFileMode } = this.getWorkerSettings();
@@ -831,6 +838,7 @@ export class WeeklyFlowWorker {
       if (!isAnyDownloadSourceConfigured()) {
         throw new Error(getDownloadSourceNotConfiguredMessage());
       }
+      this._assertJobCanContinue(job, runGeneration);
       if (!downloadTracker.enqueueDownloadPipeline(job.id)) {
         throw new Error("Failed to enqueue the download pipeline");
       }

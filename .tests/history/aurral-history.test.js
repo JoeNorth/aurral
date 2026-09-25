@@ -392,3 +392,82 @@ test("blocked track download history falls back to staging basename", async () =
 
   assert.equal(entry?.sourceFilename, "downloaded-track.mp3");
 });
+
+test("cancelled album track downloads show as cancelled, never as failed", async () => {
+  const { cancelDownloadJobs } = await importFromRepo(
+    "backend/services/weeklyFlow/weeklyFlowDownloadCancellation.js",
+  );
+  const jobId = downloadTracker.addJob(
+    {
+      artistName: "Artist",
+      trackName: "Cancelled Song",
+      albumName: "Album",
+      managedBy: "aurral",
+      requestGroupId: "cancelled-history-group",
+    },
+    "library",
+  );
+  upsertAurralHistory({
+    referenceId: jobId,
+    kind: "track_download",
+    title: "Downloading Cancelled Song",
+    subtitle: "Artist · Library",
+    status: "processing",
+    statusLabel: "Downloading",
+    metadata: {
+      jobId,
+      trackName: "Cancelled Song",
+      artistName: "Artist",
+      playlistId: "library",
+      downloadSource: "slskd",
+    },
+    createdAt: Date.now() - 20 * 60 * 1000,
+  });
+  downloadTracker.setDownloading(jobId);
+  cancelDownloadJobs([jobId]);
+  downloadTracker.setCancelled(jobId);
+  const job = downloadTracker.getJob(jobId);
+  job.createdAt = Date.now() - 20 * 60 * 1000;
+  job.startedAt = job.createdAt;
+
+  const entry = (await getAurralHistoryRequests()).find((item) => item.jobId === jobId);
+
+  assert.equal(entry?.status, "cancelled");
+  assert.equal(entry?.statusLabel, "Cancelled");
+  assert.equal(entry?.inQueue, false);
+  assert.equal(downloadTracker.getJob(jobId)?.status, "cancelled");
+});
+
+test("Aurral album requests are not checked against Lidarr by canonical album ID", async (t) => {
+  const lidarrAlbumLookups = [];
+  const lidarrStub = {
+    isConfigured: () => true,
+    getQueue: async () => [],
+    getHistory: async () => ({ records: [] }),
+    request: async () => [],
+    getAlbum: async (id) => {
+      lidarrAlbumLookups.push(String(id));
+      return null;
+    },
+  };
+  historyModule.recordAlbumRequested({
+    albumId: "4242",
+    albumName: "Aurral Owned Album",
+    artistName: "Artist",
+    managedBy: "aurral",
+    searching: true,
+  });
+  historyModule.recordAlbumRequested({
+    albumId: "4343",
+    albumName: "Lidarr Album",
+    artistName: "Artist",
+    searching: true,
+  });
+
+  const entries = await getAurralHistoryRequests(lidarrStub);
+
+  assert.deepEqual(lidarrAlbumLookups, ["4343"]);
+  const aurralEntry = entries.find((item) => item.albumName === "Aurral Owned Album");
+  assert.notEqual(aurralEntry?.status, "failed");
+  assert.doesNotMatch(aurralEntry?.title || "", /Lidarr/);
+});

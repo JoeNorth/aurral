@@ -255,9 +255,11 @@ export const recordAlbumRequested = ({
   albumName,
   artistName,
   artistMbid,
-  searching = false,
+  managedBy = null,
+  searching: requestedSearching = false,
   user = null,
 } = {}) => {
+  const searching = requestedSearching && managedBy !== "aurral";
   const name = String(albumName || "").trim() || "Album";
   const artist = String(artistName || "").trim();
   const ref = String(albumId || artistMbid || name).trim();
@@ -278,6 +280,7 @@ export const recordAlbumRequested = ({
       albumName: name,
       artistName: artist,
       artistMbid,
+      ...(managedBy ? { managedBy } : {}),
       ...requester,
     },
   });
@@ -603,6 +606,11 @@ export const syncTrackDownloadHistory = async (historyEntries = null) => {
       recordTrackJobBlocked(job, job.error || "Blocked for review");
       continue;
     }
+    if (job.status === "cancelled") {
+      recordTrackJobCancelled(job);
+      continue;
+    }
+    if (job.status === "cancel_requested") continue;
     if (isBlocked && (job.status === "pending" || job.status === "downloading")) {
       recordTrackJobFailed(job, "Denied by user — will retry");
       continue;
@@ -674,6 +682,7 @@ export const syncAlbumSearchHistory = async (lidarrClient, historyEntries = null
   const openEntries = (historyEntries || loadRecentHistory()).filter(
     (entry) =>
       entry.kind === "album_requested" &&
+      entry.metadata?.managedBy !== "aurral" &&
       (entry.status === "processing" || entry.status === "failed"),
   );
   if (!openEntries.length) return;
@@ -951,6 +960,13 @@ export const recordTrackJobFailed = (job, message = "Download failed") =>
     statusLabel: "Failed",
     title: `Failed to download ${job?.trackName || "track"}`,
     subtitle: String(message || "").trim() || `${job?.artistName || "Artist"}`,
+  });
+
+export const recordTrackJobCancelled = (job) =>
+  recordTrackJob(job, {
+    status: "cancelled",
+    statusLabel: "Cancelled",
+    title: `Cancelled ${job?.trackName || "track"}`,
   });
 
 export const recordTrackJobBlocked = (job, message = "Blocked for review") =>

@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import path from "node:path";
 import { db } from "../../config/db-sqlite.js";
 import { enqueuePipelineJob } from "../honkerDb.js";
 import { isAnyDownloadSourceConfigured } from "../downloadSourceService.js";
@@ -123,6 +124,7 @@ function rowToJob(row) {
     qualityCheckedAt: row.quality_checked_at ?? null,
     qualityUpgradeCheckedAt: row.quality_upgrade_checked_at ?? null,
     upgradeForJobId: row.upgrade_for_job_id || null,
+    manualReplacementSearch: row.manual_replacement_search === 1,
     retryCycle: false,
   };
 }
@@ -163,9 +165,10 @@ const insertStmt = db.prepare(`
     quality_bit_depth,
     quality_checked_at,
     quality_upgrade_checked_at,
-    upgrade_for_job_id
+    upgrade_for_job_id,
+    manual_replacement_search
   )
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 const updateStmt = db.prepare(`
@@ -195,7 +198,8 @@ const updateStmt = db.prepare(`
       quality_bit_depth = ?,
       quality_checked_at = ?,
       quality_upgrade_checked_at = ?,
-      upgrade_for_job_id = ?
+      upgrade_for_job_id = ?,
+      manual_replacement_search = ?
   WHERE id = ?
 `);
 
@@ -260,7 +264,9 @@ function buildPipelinePayload(job) {
   const playlistId = job.playlistId || job.playlistType;
   const artistDir = sanitizePathPart(job.artistName, "Unknown Artist");
   const albumDir = sanitizePathPart(job.albumName, "Unknown Album");
-  const ephemeral = Boolean(flowPlaylistConfig.getFlow(String(job.playlistType || "").trim()));
+  const ephemeral = Boolean(
+    flowPlaylistConfig.getFlow(String(job.playlistId || job.playlistType || "").trim()),
+  );
   return {
     phase: "search",
     jobId: job.id,
@@ -282,9 +288,13 @@ function buildPipelinePayload(job) {
     },
     attempt: 0,
     destination: buildAurralTrackDestination(playlistId, artistDir, albumDir, { ephemeral }),
-    upgrade: Boolean(job.upgradeForJobId),
+    upgrade: Boolean(job.upgradeForJobId) && !job.manualReplacementSearch,
     upgradeForJobId: job.upgradeForJobId || null,
-    allowedSources: job.upgradeForJobId ? ["slskd", "usenet", "deemix"] : null,
+    manualReplacementSearch: job.manualReplacementSearch === true,
+    allowedSources:
+      job.upgradeForJobId && !job.manualReplacementSearch
+        ? ["slskd", "usenet", "deemix"]
+        : null,
   };
 }
 
@@ -547,6 +557,7 @@ export class WeeklyFlowDownloadTracker {
           job.qualityCheckedAt ?? null,
           job.qualityUpgradeCheckedAt ?? null,
           job.upgradeForJobId ?? null,
+          job.manualReplacementSearch ? 1 : 0,
           job.id,
         );
       }
@@ -555,7 +566,9 @@ export class WeeklyFlowDownloadTracker {
     if (process.env.AURRAL_BACKGROUND_WORKER_GROUP === "flow" ||
         process.env.NODE_ENV === "test" || process.env.AURRAL_TEST_SERVER === "1") {
       for (const job of this.jobs.values()) {
-        if (job.status === "pending" && job.upgradeForJobId) this.removeJob(job.id);
+        if (job.status === "pending" && job.upgradeForJobId && !job.manualReplacementSearch) {
+          this.removeJob(job.id);
+        }
       }
     }
     this._rebuildStatsByPlaylistType();
@@ -600,6 +613,7 @@ export class WeeklyFlowDownloadTracker {
       job.qualityCheckedAt ?? null,
       job.qualityUpgradeCheckedAt ?? null,
       job.upgradeForJobId ?? null,
+      job.manualReplacementSearch ? 1 : 0,
     );
     this._touchRevision();
   }
@@ -632,6 +646,7 @@ export class WeeklyFlowDownloadTracker {
       job.qualityCheckedAt ?? null,
       job.qualityUpgradeCheckedAt ?? null,
       job.upgradeForJobId ?? null,
+      job.manualReplacementSearch ? 1 : 0,
       job.id,
     );
     this._touchRevision();
@@ -691,6 +706,29 @@ export class WeeklyFlowDownloadTracker {
     return id;
   }
 
+  ensureLibraryTrackJob(track, finalPath) {
+    const sourcePath = String(finalPath || "").trim();
+    if (!sourcePath) return null;
+    const resolvedPath = path.resolve(sourcePath);
+    const existing = [...this.jobs.values()].find(
+      (job) =>
+        job.status === "done" &&
+        job.managedBy === "aurral" &&
+        !job.upgradeForJobId &&
+        job.finalPath &&
+        path.resolve(job.finalPath) === resolvedPath,
+    );
+    if (existing) return existing;
+
+    const id = this.addJob(
+      { ...track, managedBy: "aurral", reason: track?.reason || "Aurral library track" },
+      "library",
+      { playlistId: "library" },
+    );
+    if (!id || !this.setDone(id, resolvedPath, track?.albumName)) return null;
+    return this.jobs.get(id) || null;
+  }
+
   addJobs(tracks, playlistType) {
     const ids = [];
     for (const track of tracks) {
@@ -706,7 +744,7 @@ export class WeeklyFlowDownloadTracker {
     return [...this.jobs.values()].find((job) => {
       if (
         !job.upgradeForJobId ||
-        (job.status !== "pending" && job.status !== "downloading")
+        !["pending", "downloading", "blocked"].includes(job.status)
       ) {
         return false;
       }
@@ -724,6 +762,24 @@ export class WeeklyFlowDownloadTracker {
     });
     const job = this.jobs.get(id);
     job.upgradeForJobId = sourceJob.id;
+    this.pendingSet.delete(id);
+    this.pendingRetrySet.delete(id);
+    this._removeFromPendingQueues(id);
+    this._update(job);
+    return id;
+  }
+
+  addReplacementSearchJob(sourceJob) {
+    if (!sourceJob?.id || sourceJob.status !== "done" || !sourceJob.finalPath) return null;
+    if (this.findActiveUpgradeJob(sourceJob)) return null;
+    const playlistId = sourceJob.playlistId || sourceJob.playlistType;
+    const id = this.addJob(sourceJob, "quality-upgrade", {
+      playlistId,
+      playlistGeneration: getPlaylistDownloadGeneration(playlistId),
+    });
+    const job = this.jobs.get(id);
+    job.upgradeForJobId = sourceJob.id;
+    job.manualReplacementSearch = true;
     this.pendingSet.delete(id);
     this.pendingRetrySet.delete(id);
     this._removeFromPendingQueues(id);
@@ -1305,7 +1361,11 @@ export class WeeklyFlowDownloadTracker {
   }
 
   clearCompleted() {
-    return this._deleteJobsWhere((job) => job.status === "done" || job.status === "failed");
+    return this._deleteJobsWhere(
+      (job) =>
+        (job.status === "done" || job.status === "failed") &&
+        !(job.status === "done" && this.findActiveUpgradeJob(job)),
+    );
   }
 
   clearByPlaylistType(playlistType) {
